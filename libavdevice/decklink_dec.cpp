@@ -810,10 +810,19 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
     // Drop the frames till system's timestamp aligns with the configured value.
     if (0 == ctx->frameCount && cctx->timestamp_align) {
-        av_log(avctx, AV_LOG_INFO, "Timestamp_align (%u) - now %u - remainder %u\n", cctx->timestamp_align, av_gettime(), av_gettime() % cctx->timestamp_align);
+        av_log(avctx, AV_LOG_INFO, "Timestamp_align (%lld) - now %lld - remainder %lld\n", cctx->timestamp_align, av_gettime(), av_gettime() % cctx->timestamp_align);
         AVRational remainder = av_make_q(av_gettime() % cctx->timestamp_align, 1000000);
         AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
         if (av_cmp_q(remainder, frame_duration) > 0) {
+            ++ctx->dropped;
+            return S_OK;
+        }
+    }
+
+    if (0 == ctx->frameCount && cctx->wait_for_wallclock)
+    {
+        if (av_gettime() < cctx->wait_for_wallclock) {
+            av_log(avctx, AV_LOG_INFO, "Wait for wallclock (%lld) - now %lld - remainder %lld\n", cctx->wait_for_wallclock, av_gettime(), cctx->wait_for_wallclock - av_gettime());
             ++ctx->dropped;
             return S_OK;
         }

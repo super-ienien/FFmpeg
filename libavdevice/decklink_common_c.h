@@ -57,7 +57,7 @@ struct decklink_cctx {
     int64_t queue_size;
     int copyts;
     int64_t timestamp_align;
-    int64_t wait_for_abs_wallclock;
+    int64_t wait_for_wallclock;
     int timing_offset;
     int wait_for_tc;
 };
