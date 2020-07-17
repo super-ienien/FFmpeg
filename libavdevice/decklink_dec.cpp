@@ -830,7 +830,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         }
         else
         {
-            av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
+            av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld - dropped : %lld\n", now, ctx->dropped);
         }
     }
 
