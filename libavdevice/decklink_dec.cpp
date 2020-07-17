@@ -819,12 +819,18 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         }
     }
 
-    if (0 == ctx->frameCount && cctx->wait_for_wallclock)
-    {
-        if (av_gettime() < cctx->wait_for_wallclock) {
-            av_log(avctx, AV_LOG_INFO, "Wait for wallclock (%lld) - now %lld - remainder %lld\n", cctx->wait_for_wallclock, av_gettime(), cctx->wait_for_wallclock - av_gettime());
+    if (0 == ctx->frameCount && cctx->abs_timestamp_align) {
+        int64_t now = av_gettime();
+        AVRational remainder = av_make_q(cctx->abs_timestamp_align * 1000 - now, 1000000);
+        AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
+        if (av_cmp_q(remainder, frame_duration) > 0) {
+            av_log(avctx, AV_LOG_INFO, "Wait for wallclock (%lld) - now %lld - remainder %lld\n", cctx->abs_timestamp_align * 1000, now, cctx->abs_timestamp_align * 1000 - now);
             ++ctx->dropped;
             return S_OK;
+        }
+        else
+        {
+            av_log(avctx, AV_LOG_INFO, "start at wallclock (%lld) - now %lld - remainder %lld\n", cctx->abs_timestamp_align * 1000, now, cctx->abs_timestamp_align * 1000 - now);
         }
     }
 

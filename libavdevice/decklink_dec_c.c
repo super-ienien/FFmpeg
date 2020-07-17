@@ -86,7 +86,7 @@ static const AVOption options[] = {
     {"decklink_copyts", "copy timestamps, do not remove the initial offset", OFFSET(copyts), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DEC},
     {"timestamp_align", "capture start time alignment (in seconds)", OFFSET(timestamp_align), AV_OPT_TYPE_DURATION, {.i64 = 0}, 0, INT_MAX, DEC},
     {"wait_for_tc", "drop frames till a frame with timecode is received. TC format must be set", OFFSET(wait_for_tc), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DEC},
-    {"wait_for_wallclock", "drop frames till specified wallclock value in ms", OFFSET(wait_for_wallclock), AV_OPT_TYPE_INT64, {.i64 = 0}, 0, INT64_MAX, DEC},
+    {"abs_timestamp_align", "drop frames till specified wallclock value in ms", OFFSET(abs_timestamp_align), AV_OPT_TYPE_INT64, {.i64 = 0}, 0, INT64_MAX, DEC},
     {NULL},
 };
 
