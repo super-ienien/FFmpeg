@@ -855,15 +855,49 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         return S_OK;
     }
 
-    // Drop the frames till system's timestamp aligns with the configured value.
-    if (0 == ctx->frameCount && cctx->timestamp_align) {
-        AVRational remainder = av_make_q(av_gettime() % cctx->timestamp_align, 1000000);
-        AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
-        if (av_cmp_q(remainder, frame_duration) > 0) {
-            ++ctx->dropped;
-            return S_OK;
+    if (0 == ctx->frameCount)
+    {
+        // Drop the frames till system's timestamp aligns with the configured value.
+        if (cctx->timestamp_align)
+        {
+            // av_log(avctx, AV_LOG_INFO, "Timestamp_align (%lld) - now %lld - remainder %lld\n", cctx->timestamp_align, av_gettime(), av_gettime() % cctx->timestamp_align);
+            AVRational remainder = av_make_q(av_gettime() % cctx->timestamp_align, 1000000);
+            AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
+            if (av_cmp_q(remainder, frame_duration) > 0)
+            {
+                ++ctx->dropped;
+                return S_OK;
+            }
+            else
+            {
+                int64_t now = av_gettime();
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
+            }
+        }
+        else if (cctx->abs_timestamp_align)
+        {
+            int64_t now = av_gettime();
+            AVRational remainder = av_make_q(cctx->abs_timestamp_align * 1000 - now, 1000000);
+            AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
+            if (av_cmp_q(remainder, frame_duration) > 0)
+            {
+                // av_log(avctx, AV_LOG_INFO, "Wait for wallclock (%lld) - now %lld - remainder %lld\n", cctx->abs_timestamp_align * 1000, now, cctx->abs_timestamp_align * 1000 - now);
+                ++ctx->dropped;
+                return S_OK;
+            }
+            else
+            {
+                int64_t now = av_gettime();
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
+            }
+        }
+        else
+        {
+            int64_t now = av_gettime();
+            av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
         }
     }
+
 
     ctx->frameCount++;
     if (ctx->audio_pts_source == PTS_SRC_WALLCLOCK || ctx->video_pts_source == PTS_SRC_WALLCLOCK)
