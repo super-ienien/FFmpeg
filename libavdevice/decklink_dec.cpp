@@ -24,8 +24,8 @@
 #include <vector>
 #include <iostream>
 #include <csignal>
-#include <stdatomic.h>
 
+#include <atomic>
 using std::atomic;
 
 /* Include internal.h first to avoid conflict between winsock.h (used by
@@ -61,7 +61,7 @@ extern "C" {
 
 #define MAX_WIDTH_VANC 1920
 const BMDDisplayMode AUTODETECT_DEFAULT_MODE = bmdModeNTSC;
-int is_sigusr1_received = 0;
+std::atomic<int> is_sigusr1_received = 0;
 
 void sighandler(int signum) {
     is_sigusr1_received = 1;
