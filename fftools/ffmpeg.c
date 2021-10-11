@@ -4074,6 +4074,11 @@ static int check_keyboard_interaction(int64_t cur_time)
         if(debug) av_log_set_level(AV_LOG_DEBUG);
         fprintf(stderr,"debug=%d\n", debug);
     }
+    if (key == 'r'){
+        for (i = 0; i < nb_input_files; i++) {
+            input_files[i]->ctx->wait_for_input = 0;
+        }
+    }
     if (key == '?'){
         fprintf(stderr, "key    function\n"
                         "?      show this help\n"

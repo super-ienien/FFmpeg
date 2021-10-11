@@ -91,7 +91,7 @@ static const AVOption options[] = {
     { "timestamp_align", "capture start time alignment (in seconds)", OFFSET(timestamp_align), AV_OPT_TYPE_DURATION, { .i64 = 0 }, 0, INT_MAX, DEC },
     { "abs_timestamp_align", "drop frames till specified wallclock value in ms", OFFSET(abs_timestamp_align), AV_OPT_TYPE_INT64, {.i64 = 0}, 0, INT64_MAX, DEC},
     { "wait_for_tc",     "drop frames till a frame with timecode is received. TC format must be set", OFFSET(wait_for_tc), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, DEC },
-    { "wait_for_sigusr1",     "drop frames till SIGUSR1 is received", OFFSET(wait_for_sigusr1), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, DEC },
+    { "wait_for_input",     "drop frames till a 'r' key is pressed", OFFSET(wait_for_input), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, DEC },
     { NULL },
 };
 

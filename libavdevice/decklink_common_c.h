@@ -62,7 +62,6 @@ struct decklink_cctx {
     int64_t abs_timestamp_align;
     int timing_offset;
     int wait_for_tc;
-    int wait_for_sigusr1;
 };
 
 #endif /* AVDEVICE_DECKLINK_COMMON_C_H */
