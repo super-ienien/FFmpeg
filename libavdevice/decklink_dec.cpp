@@ -849,6 +849,13 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     int64_t wallclock = 0, abs_wallclock = 0;
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
 
+    if (no_frame_arrived) {
+        no_frame_arrived = 0;
+        if (cctx->wait_for_input) {
+            av_log(avctx, AV_LOG_INFO, "WAIT FOR USER INPUT KEY : r\n");
+        }
+    }
+
     if (ctx->autodetect) {
         if (videoFrame && !(videoFrame->GetFlags() & bmdFrameHasNoInputSource) &&
             ctx->bmd_mode == bmdModeUnknown)
@@ -858,20 +865,18 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         return S_OK;
     }
 
-    if (no_frame_arrived) {
-        no_frame_arrived = 0;
-        if (avctx->wait_for_input) {
-            av_log(avctx, AV_LOG_INFO, "WAIT FOR USER INPUT KEY : r\n");
-        }
-    }
-
     if (0 == ctx->frameCount)
     {
         // Drop the frames till user input r.
-        if (avctx->wait_for_input)
+        if (cctx->wait_for_input)
         {
-            ++ctx->dropped;
-            return S_OK;
+            int key = read_key();
+            if (key == 'r') {
+                cctx->wait_for_input = 0;
+            } else {
+                ++ctx->dropped;
+                return S_OK;
+            }
         } else {
             av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
         }
@@ -1168,14 +1173,26 @@ static int decklink_autodetect(struct decklink_cctx *cctx) {
     }
 
     // 3 second timeout
-    for (i = 0; i < 30; i++) {
-        av_usleep(100000);
-        /* Sometimes VideoInputFrameArrived is called without the
-         * bmdFrameHasNoInputSource flag before VideoInputFormatChanged.
-         * So don't break for bmd_mode == AUTODETECT_DEFAULT_MODE. */
-        if (ctx->bmd_mode != bmdModeUnknown &&
-            ctx->bmd_mode != AUTODETECT_DEFAULT_MODE)
-            break;
+    if (cctx->no_autodetect_timeout) {
+        while (1) {
+            av_usleep(100000);
+            /* Sometimes VideoInputFrameArrived is called without the
+            * bmdFrameHasNoInputSource flag before VideoInputFormatChanged.
+            * So don't break for bmd_mode == AUTODETECT_DEFAULT_MODE. */
+            if (ctx->bmd_mode != bmdModeUnknown &&
+                ctx->bmd_mode != AUTODETECT_DEFAULT_MODE)
+                break;
+        }
+    } else {
+        for (i = 0; i < 30; i++) {
+            av_usleep(100000);
+            /* Sometimes VideoInputFrameArrived is called without the
+            * bmdFrameHasNoInputSource flag before VideoInputFormatChanged.
+            * So don't break for bmd_mode == AUTODETECT_DEFAULT_MODE. */
+            if (ctx->bmd_mode != bmdModeUnknown &&
+                ctx->bmd_mode != AUTODETECT_DEFAULT_MODE)
+                break;
+        }
     }
 
     ctx->dli->PauseStreams();
