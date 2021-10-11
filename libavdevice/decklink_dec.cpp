@@ -65,8 +65,7 @@ std::atomic<int> is_sigusr1_received = 0;
 
 void sighandler(int signum) {
     is_sigusr1_received = 1;
-    av_log(avctx, AV_LOG_INFO, "SIGUSR1 received (%d).\n", signum);
-    cout << "SIGUSR1 received.\n";
+    std::cout << "SIGUSR1 received (" << signum << ")." << std:endl;
 }
 
 signal(SIGUSR1, sighandler);
@@ -872,8 +871,10 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         // Drop the frames till SIGUSR1.
         if (cctx->wait_for_sigusr1 && !is_sigusr1_received)
         {
-            ++ctx->dropped
+            ++ctx->dropped;
             return S_OK;
+        } else {
+            av_log(avctx, AV_LOG_INFO, "SIGUSR1 received (%d).\n");
         }
 
         // Drop the frames till system's timestamp aligns with the configured value.
