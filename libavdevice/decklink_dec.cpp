@@ -22,10 +22,7 @@
  */
 
 #include <vector>
-#include <iostream>
-#include <csignal>
 
-#include <atomic>
 using std::atomic;
 
 /* Include internal.h first to avoid conflict between winsock.h (used by
@@ -61,12 +58,6 @@ extern "C" {
 
 #define MAX_WIDTH_VANC 1920
 const BMDDisplayMode AUTODETECT_DEFAULT_MODE = bmdModeNTSC;
-std::atomic_int is_sigusr1_received(0);
-
-void sighandler(int signum) {
-    is_sigusr1_received = 1;
-    std::cout << "SIGUSR1 received (" << signum << ")." << std::endl;
-}
 
 typedef struct VANCLineNumber {
     BMDDisplayMode mode;
@@ -715,6 +706,7 @@ private:
         AVFormatContext *avctx;
         decklink_ctx    *ctx;
         int no_video;
+        int no_frame_arrived;
         int64_t initial_video_pts;
         int64_t initial_audio_pts;
 };
@@ -725,6 +717,7 @@ decklink_input_callback::decklink_input_callback(AVFormatContext *_avctx) : _ref
     decklink_cctx       *cctx = (struct decklink_cctx *)avctx->priv_data;
     ctx = (struct decklink_ctx *)cctx->ctx;
     no_video = 0;
+    no_frame_arrived = 1;
     initial_audio_pts = initial_video_pts = AV_NOPTS_VALUE;
 }
 
@@ -864,15 +857,22 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         return S_OK;
     }
 
+    if (no_frame_arrived) {
+        no_frame_arrived = 0;
+        if (avctx->wait_for_input) {
+            av_log(avctx, AV_LOG_INFO, "WAIT FOR USER INPUT KEY : r\n");
+        }
+    }
+
     if (0 == ctx->frameCount)
     {
-        // Drop the frames till SIGUSR1.
-        if (cctx->wait_for_sigusr1 && !is_sigusr1_received)
+        // Drop the frames till user input r.
+        if (avctx->wait_for_input)
         {
             ++ctx->dropped;
             return S_OK;
         } else {
-            av_log(avctx, AV_LOG_INFO, "SIGUSR1 received (%d).\n");
+            av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
         }
 
         // Drop the frames till system's timestamp aligns with the configured value.
@@ -1245,11 +1245,6 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     if (cctx->raw_format > 0 && (unsigned int)cctx->raw_format < FF_ARRAY_ELEMS(decklink_raw_format_map))
         ctx->raw_format = decklink_raw_format_map[cctx->raw_format];
     cctx->ctx = ctx;
-
-    if (cctx->wait_for_sigusr1) {
-       std::signal(10, sighandler);
-       av_log(avctx, AV_LOG_INFO, "Wait for SIGUSR1 to start encoding\n");
-    }
 
     /* Check audio channel option for valid values: 2, 8 or 16 */
     switch (cctx->audio_channels) {
