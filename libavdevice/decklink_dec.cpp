@@ -65,7 +65,7 @@ std::atomic_int is_sigusr1_received(0);
 
 void sighandler(int signum) {
     is_sigusr1_received = 1;
-    std::cout << "SIGUSR1 received (" << signum << ")." << std:endl;
+    std::cout << "SIGUSR1 received (" << signum << ")." << std::endl;
 }
 
 typedef struct VANCLineNumber {
@@ -1247,7 +1247,7 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     cctx->ctx = ctx;
 
     if (cctx->wait_for_sigusr1) {
-       std::signal(std::SIGUSR1, sighandler);
+       std::signal(10, sighandler);
        av_log(avctx, AV_LOG_INFO, "Wait for SIGUSR1 to start encoding\n");
     }
 
