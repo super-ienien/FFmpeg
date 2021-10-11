@@ -61,7 +61,7 @@ extern "C" {
 
 #define MAX_WIDTH_VANC 1920
 const BMDDisplayMode AUTODETECT_DEFAULT_MODE = bmdModeNTSC;
-std::atomic<int> is_sigusr1_received = 0;
+std::atomic_int is_sigusr1_received(0);
 
 void sighandler(int signum) {
     is_sigusr1_received = 1;
@@ -1247,7 +1247,7 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     cctx->ctx = ctx;
 
     if (cctx->wait_for_sigusr1) {
-       signal(SIGUSR1, sighandler);
+       std::signal(std::SIGUSR1, sighandler);
        av_log(avctx, AV_LOG_INFO, "Wait for SIGUSR1 to start encoding\n");
     }
 
