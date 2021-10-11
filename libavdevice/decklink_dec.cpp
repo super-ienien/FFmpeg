@@ -68,8 +68,6 @@ void sighandler(int signum) {
     std::cout << "SIGUSR1 received (" << signum << ")." << std:endl;
 }
 
-signal(SIGUSR1, sighandler);
-
 typedef struct VANCLineNumber {
     BMDDisplayMode mode;
     int vanc_start;
@@ -1249,7 +1247,8 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     cctx->ctx = ctx;
 
     if (cctx->wait_for_sigusr1) {
-        av_log(avctx, AV_LOG_INFO, "Wait for SIGUSR1 to start encoding\n");
+       signal(SIGUSR1, sighandler);
+       av_log(avctx, AV_LOG_INFO, "Wait for SIGUSR1 to start encoding\n");
     }
 
     /* Check audio channel option for valid values: 2, 8 or 16 */
