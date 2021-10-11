@@ -23,6 +23,9 @@
 
 #include <atomic>
 #include <vector>
+#include <iostream>
+#include <csignal>
+
 using std::atomic;
 
 /* Include internal.h first to avoid conflict between winsock.h (used by
@@ -58,6 +61,15 @@ extern "C" {
 
 #define MAX_WIDTH_VANC 1920
 const BMDDisplayMode AUTODETECT_DEFAULT_MODE = bmdModeNTSC;
+atomic_int is_sigusr1_received = 0;
+
+void sighandler(int signum) {
+    is_sigusr1_received = 1;
+    av_log(avctx, AV_LOG_INFO, "SIGUSR1 received (%d).\n", signum);
+    cout << "SIGUSR1 received.\n";
+}
+
+signal(SIGUSR1, sighandler);
 
 typedef struct VANCLineNumber {
     BMDDisplayMode mode;
@@ -708,6 +720,7 @@ private:
         int no_video;
         int64_t initial_video_pts;
         int64_t initial_audio_pts;
+        int is_waiting_for_signal;
 };
 
 decklink_input_callback::decklink_input_callback(AVFormatContext *_avctx) : _refs(1)
@@ -717,6 +730,10 @@ decklink_input_callback::decklink_input_callback(AVFormatContext *_avctx) : _ref
     ctx = (struct decklink_ctx *)cctx->ctx;
     no_video = 0;
     initial_audio_pts = initial_video_pts = AV_NOPTS_VALUE;
+    is_waiting_for_signal = cctx->wait_for_sigusr1 ? 1 : 0;
+    if (is_waiting_for_signal) {
+        av_log(avctx, AV_LOG_INFO, "Wait for SIGUSR1 to start encoding\n");
+    }
 }
 
 decklink_input_callback::~decklink_input_callback()
@@ -857,6 +874,13 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
     if (0 == ctx->frameCount)
     {
+        // Drop the frames till SIGUSR1.
+        if (cctx->is_waiting_for_signal && !is_sigusr1_received)
+        {
+            ++ctx->dropped
+            return S_OK;
+        }
+
         // Drop the frames till system's timestamp aligns with the configured value.
         if (cctx->timestamp_align)
         {
