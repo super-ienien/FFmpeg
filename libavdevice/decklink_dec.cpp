@@ -54,6 +54,15 @@ extern "C" {
 #endif
 }
 
+#if HAVE_TERMIOS_H
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/time.h>
+#include <termios.h>
+#elif HAVE_KBHIT
+#include <conio.h>
+#endif
+
 #include "decklink_common.h"
 #include "decklink_dec.h"
 
