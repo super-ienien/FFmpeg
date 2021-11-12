@@ -981,6 +981,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
             int64_t now = av_gettime();
             videoFrame->GetStreamTime(&frameTime, &frameDuration, 1000000);
             av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now - frameDuration);
+            av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
             av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", frameDuration);
         }
     }
