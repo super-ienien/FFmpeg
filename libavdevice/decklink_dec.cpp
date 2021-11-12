@@ -979,10 +979,13 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         else
         {
             int64_t now = av_gettime();
+            auto uptime = std::chrono::milliseconds(GetTickCount64());
             if (videoFrame->GetHardwareReferenceTimestamp(1000000, &frameTime, &frameDuration) == S_OK) {
                 av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now - frameDuration);
                 av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
-                av_log(avctx, AV_LOG_INFO, "First frame hardware time : %lld\n", frameTime);
+                av_log(avctx, AV_LOG_INFO, "First frame system time : %lld\n", frameTime);
+                av_log(avctx, AV_LOG_INFO, "system time : %lld\n", uptime);
+                av_log(avctx, AV_LOG_INFO, "offset : %lld\n", uptime - frameTime);
                 av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", frameDuration);
             } else {
                 av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
