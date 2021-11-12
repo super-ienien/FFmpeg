@@ -979,10 +979,17 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         else
         {
             int64_t now = av_gettime();
-            videoFrame->GetStreamTime(&frameTime, &frameDuration, 1000000);
-            av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now - frameDuration);
-            av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
-            av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", frameDuration);
+            if (videoFrame->GetHardwareReferenceTimestamp(1000000, &frameTime, &frameDuration) == S_OK) {
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now - frameDuration);
+                av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "First frame hardware time : %lld\n", frameTime);
+                av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", frameDuration);
+            } else {
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "First frame hardware time : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", 0);
+            }
         }
     }
 
