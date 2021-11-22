@@ -1216,51 +1216,6 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
     BMDVideoInputFormatChangedEvents notificationEvents, IDeckLinkDisplayMode *mode,
     BMDDetectedVideoInputFormatFlags formatFlags)
 {
-    if (notificationEvents & bmdVideoInputFieldDominanceChanged) {
-        av_log(avctx, AV_LOG_INFO, "Field dominance change detected hot\n");
-    }
-    
-    if (notificationEvents & bmdVideoInputColorspaceChanged)
-    {
-        av_log(avctx, AV_LOG_INFO, "Color space change detected\n");
-        if (formatFlags & bmdDetectedVideoInputYCbCr422)
-        {
-            av_log(avctx, AV_LOG_INFO, "YCbCr422 ");
-            if (formatFlags & bmdDetectedVideoInput8BitDepth)
-            {
-                av_log(avctx, AV_LOG_INFO, "8-bit depth\n");
-            }
-            else if (formatFlags & bmdDetectedVideoInput10BitDepth)
-            {
-                av_log(avctx, AV_LOG_INFO, "10-bit depth\n");
-            }
-            else
-            {
-                av_log(avctx, AV_LOG_INFO, "\n");
-            }
-        }
-        else if (formatFlags & bmdDetectedVideoInputRGB444)
-        {
-            av_log(avctx, AV_LOG_INFO, "RGB444 ");
-            if (formatFlags & bmdDetectedVideoInput8BitDepth)
-            {
-                av_log(avctx, AV_LOG_INFO, "8-bit depth\n");
-            }
-            else if (formatFlags & bmdDetectedVideoInput10BitDepth)
-            {
-                av_log(avctx, AV_LOG_INFO, "10-bit depth\n");
-            }
-            else if (formatFlags & bmdDetectedVideoInput12BitDepth)
-            {
-                av_log(avctx, AV_LOG_INFO, "12-bit depth\n");
-            }
-            else
-            {
-                av_log(avctx, AV_LOG_INFO, "\n");
-            }
-        }
-    }
-    
     if (notificationEvents & bmdVideoInputDisplayModeChanged)
     {
         av_log(avctx, AV_LOG_INFO, "Video mode change detected\n");
@@ -1275,27 +1230,31 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
             av_log(avctx, AV_LOG_INFO, "Format changed autodetect\n");
             if (!cctx->raw_format)
                 ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
-        } else {
+            return S_OK;
+        } else if (0 == ctx->frameCount) {
             struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
+            auto oldFormat = ctx->raw_format;
             ctx->bmd_mode = mode->GetDisplayMode();
-            av_log(avctx, AV_LOG_INFO, "Format changed hot\n");
             ctx->dli->PauseStreams();
             ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
             if (ctx->raw_format == (BMDPixelFormat)0)
                 ctx->raw_format = bmdFormat8BitYUV;
-            if (ff_decklink_set_format(avctx, DIRECTION_IN) < 0) {
-                av_log(avctx, AV_LOG_ERROR, "Could not set format code %s for %s\n",
-                    cctx->format_code ? cctx->format_code : "(unset)", avctx->url);
-                goto error;
-            }
-            if (ctx->dli->EnableVideoInput(ctx->bmd_mode, ctx->raw_format, bmdVideoInputEnableFormatDetection) != S_OK) {
-                av_log(avctx, AV_LOG_ERROR, "Cannot enable video input after format changed\n");
-                goto error;
-            }
-            ctx->dli->FlushStreams();
-            if (ctx->dli->StartStreams() != S_OK) {
-                av_log(avctx, AV_LOG_ERROR, "Cannot start input stream after format changed\n");
-                goto error;
+            if (ctx->raw_format != oldFormat) {
+                av_log(avctx, AV_LOG_INFO, "Format changed hot %s\n", ctx->raw_format);
+                if (ff_decklink_set_format(avctx, DIRECTION_IN) < 0) {
+                    av_log(avctx, AV_LOG_ERROR, "Could not set format code %s for %s\n",
+                        cctx->format_code ? cctx->format_code : "(unset)", avctx->url);
+                    goto error;
+                }
+                if (ctx->dli->EnableVideoInput(ctx->bmd_mode, ctx->raw_format, bmdVideoInputEnableFormatDetection) != S_OK) {
+                    av_log(avctx, AV_LOG_ERROR, "Cannot enable video input after format changed\n");
+                    goto error;
+                }
+                ctx->dli->FlushStreams();
+                if (ctx->dli->StartStreams() != S_OK) {
+                    av_log(avctx, AV_LOG_ERROR, "Cannot start input stream after format changed\n");
+                    goto error;
+                }
             }
         }
     }
