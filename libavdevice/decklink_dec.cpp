@@ -1223,14 +1223,14 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
     if (notificationEvents & bmdVideoInputColorspaceChanged)
     {
         av_log(avctx, AV_LOG_INFO, "Color space change detected\n");
-        if (detectedSignalFlags & bmdDetectedVideoInputYCbCr422)
+        if (formatFlags & bmdDetectedVideoInputYCbCr422)
         {
             av_log(avctx, AV_LOG_INFO, "YCbCr422 ");
-            if (detectedSignalFlags & bmdDetectedVideoInput8BitDepth)
+            if (formatFlags & bmdDetectedVideoInput8BitDepth)
             {
                 av_log(avctx, AV_LOG_INFO, "8-bit depth\n");
             }
-            else if (detectedSignalFlags & bmdDetectedVideoInput10BitDepth)
+            else if (formatFlags & bmdDetectedVideoInput10BitDepth)
             {
                 av_log(avctx, AV_LOG_INFO, "10-bit depth\n");
             }
@@ -1239,18 +1239,18 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
                 av_log(avctx, AV_LOG_INFO, "\n");
             }
         }
-        else if (detectedSignalFlags & bmdDetectedVideoInputRGB444)
+        else if (formatFlags & bmdDetectedVideoInputRGB444)
         {
             av_log(avctx, AV_LOG_INFO, "RGB444 ");
-            if (detectedSignalFlags & bmdDetectedVideoInput8BitDepth)
+            if (formatFlags & bmdDetectedVideoInput8BitDepth)
             {
                 av_log(avctx, AV_LOG_INFO, "8-bit depth\n");
             }
-            else if (detectedSignalFlags & bmdDetectedVideoInput10BitDepth)
+            else if (formatFlags & bmdDetectedVideoInput10BitDepth)
             {
                 av_log(avctx, AV_LOG_INFO, "10-bit depth\n");
             }
-            else if (detectedSignalFlags & bmdDetectedVideoInput12BitDepth)
+            else if (formatFlags & bmdDetectedVideoInput12BitDepth)
             {
                 av_log(avctx, AV_LOG_INFO, "12-bit depth\n");
             }
