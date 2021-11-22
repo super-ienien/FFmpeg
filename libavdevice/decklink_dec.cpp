@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <vector>
+#include <chrono>
 
 using std::atomic;
 
@@ -1232,19 +1233,14 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
                 cctx->format_code ? cctx->format_code : "(unset)", avctx->url);
             goto error;
         }
-        result = ctx->dli->EnableVideoInput(ctx->bmd_mode,
-                                            ctx->raw_format,
-                                            bmdVideoInputEnableFormatDetection);
-
-        if (result != S_OK) {
+        if (ctx->dli->EnableVideoInput(ctx->bmd_mode, ctx->raw_format, bmdVideoInputEnableFormatDetection) != S_OK) {
             av_log(avctx, AV_LOG_ERROR, "Cannot enable video input after format changed\n");
             goto error;
-        } else {
-            ctx->dli->FlushStreams();
-            if (ctx->dli->StartStreams() != S_OK) {
-                av_log(avctx, AV_LOG_ERROR, "Cannot start input stream after format changed\n");
-                goto error;
-            }
+        }
+        ctx->dli->FlushStreams();
+        if (ctx->dli->StartStreams() != S_OK) {
+            av_log(avctx, AV_LOG_ERROR, "Cannot start input stream after format changed\n");
+            goto error;
         }
 
         return S_OK;
