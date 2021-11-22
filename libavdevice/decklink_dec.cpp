@@ -1266,7 +1266,7 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
         av_log(avctx, AV_LOG_INFO, "Video mode change detected\n");
     }
     
-    if (notificationEvents & (bmdVideoInputDisplayModeChanged | bmdVideoInputColorspaceChanged))
+    if (notificationEvents & bmdVideoInputDisplayModeChanged)
     {
         // check the C context member to make sure we set both raw_format and bmd_mode with data from the same format change callback
         if (ctx->autodetect) {
