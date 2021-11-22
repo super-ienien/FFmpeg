@@ -1224,7 +1224,6 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
         av_log(avctx, AV_LOG_INFO, "Format changed autodetect\n");
         if (!cctx->raw_format)
             ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
-        return S_OK;
     } else {
         av_log(avctx, AV_LOG_INFO, "Format changed hot\n");
         ctx->dli->PauseStreams();
@@ -1245,9 +1244,8 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
             av_log(avctx, AV_LOG_ERROR, "Cannot start input stream after format changed\n");
             goto error;
         }
-
-        return S_OK;
     }
+    return S_OK;
 error:
     av_log(avctx, AV_LOG_INFO, "Format changed error\n");
     ctx->dli->StopStreams();
