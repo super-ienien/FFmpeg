@@ -1301,6 +1301,7 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
     }
     return S_OK;
 error:
+    struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
     av_log(avctx, AV_LOG_INFO, "Format changed error\n");
     ctx->dli->StopStreams();
     ctx->dli->DisableVideoInput();
