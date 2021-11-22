@@ -919,10 +919,31 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     }
 
     if (ctx->autodetect) {
-        if (videoFrame && !(videoFrame->GetFlags() & bmdFrameHasNoInputSource) &&
-            ctx->bmd_mode == bmdModeUnknown)
+        // Handle Video Frame
+        if (videoFrame) {
+            if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
+                if (!no_video) {
+                    av_log(avctx, AV_LOG_WARNING, "No input signal detected\n");
+                }
+                no_video = 1;
+            } else {
+                if (no_video) {
+                    av_log(avctx, AV_LOG_WARNING, "Input returned\n");
+                }
+                no_video = 0;
+                if (ctx->bmd_mode == bmdModeUnknown) {
+                    ctx->bmd_mode = AUTODETECT_DEFAULT_MODE;
+                }
+            }
+        }
+        // look for input r.
+        if (cctx->wait_for_input)
         {
-            ctx->bmd_mode = AUTODETECT_DEFAULT_MODE;
+            int key = read_key();
+            if (key == 'r') {
+                av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
+                cctx->wait_for_input = 0;
+            }
         }
         return S_OK;
     }
@@ -934,13 +955,12 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         {
             int key = read_key();
             if (key == 'r') {
+                av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
                 cctx->wait_for_input = 0;
             } else {
                 ++ctx->dropped;
                 return S_OK;
             }
-        } else {
-            av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
         }
 
         // Drop the frames till system's timestamp aligns with the configured value.
@@ -1213,62 +1233,15 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 }
 
 HRESULT decklink_input_callback::VideoInputFormatChanged(
-    BMDVideoInputFormatChangedEvents notificationEvents, IDeckLinkDisplayMode *mode,
+    BMDVideoInputFormatChangedEvents events, IDeckLinkDisplayMode *mode,
     BMDDetectedVideoInputFormatFlags formatFlags)
 {
-    if (notificationEvents & bmdVideoInputDisplayModeChanged)
-    {
-        av_log(avctx, AV_LOG_INFO, "Video mode change detected\n");
-    }
-    
-    if (notificationEvents & bmdVideoInputDisplayModeChanged)
-    {
-        // check the C context member to make sure we set both raw_format and bmd_mode with data from the same format change callback
-        if (ctx->autodetect) {
-            struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
-            ctx->bmd_mode = mode->GetDisplayMode();
-            av_log(avctx, AV_LOG_INFO, "Format changed autodetect\n");
-            if (!cctx->raw_format)
-                ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
-            return S_OK;
-        } else if (0 == ctx->frameCount) {
-            struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
-            auto oldFormat = ctx->raw_format;
-            ctx->bmd_mode = mode->GetDisplayMode();
-            ctx->dli->PauseStreams();
-            ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
-            if (ctx->raw_format == (BMDPixelFormat)0)
-                ctx->raw_format = bmdFormat8BitYUV;
-            if (ctx->raw_format != oldFormat) {
-                av_log(avctx, AV_LOG_INFO, "Format changed hot %s\n", ctx->raw_format);
-                if (ff_decklink_set_format(avctx, DIRECTION_IN) < 0) {
-                    av_log(avctx, AV_LOG_ERROR, "Could not set format code %s for %s\n",
-                        cctx->format_code ? cctx->format_code : "(unset)", avctx->url);
-                    goto error;
-                }
-                if (ctx->dli->EnableVideoInput(ctx->bmd_mode, ctx->raw_format, bmdVideoInputEnableFormatDetection) != S_OK) {
-                    av_log(avctx, AV_LOG_ERROR, "Cannot enable video input after format changed\n");
-                    goto error;
-                }
-                ctx->dli->FlushStreams();
-                if (ctx->dli->StartStreams() != S_OK) {
-                    av_log(avctx, AV_LOG_ERROR, "Cannot start input stream after format changed\n");
-                    goto error;
-                }
-            }
-        }
-    }
-    return S_OK;
-error:
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
-    av_log(avctx, AV_LOG_INFO, "Format changed error\n");
-    ctx->dli->StopStreams();
-    ctx->dli->DisableVideoInput();
-    ctx->dli->DisableAudioInput();
-    ff_decklink_cleanup(avctx);
-    avpacket_queue_end(&ctx->queue);
-    av_freep(&cctx->ctx);
-    return E_FAIL;        
+    ctx->bmd_mode = mode->GetDisplayMode();
+    // check the C context member to make sure we set both raw_format and bmd_mode with data from the same format change callback
+    if (!cctx->raw_format)
+        ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
+    return S_OK;
 }
 
 static int decklink_autodetect(struct decklink_cctx *cctx) {
@@ -1611,7 +1584,7 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
 
     result = ctx->dli->EnableVideoInput(ctx->bmd_mode,
                                         ctx->raw_format,
-                                        bmdVideoInputEnableFormatDetection);
+                                        bmdVideoInputFlagDefault);
 
     if (result != S_OK) {
         av_log(avctx, AV_LOG_ERROR, "Cannot enable video input\n");
