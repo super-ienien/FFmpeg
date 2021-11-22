@@ -223,6 +223,7 @@ int ff_decklink_set_format(AVFormatContext *avctx,
                                enum AVFieldOrder field_order,
                                decklink_direction_t direction)
 {
+    av_log(avctx, AV_LOG_INFO, "Decklink set format\n");
     struct decklink_cctx *cctx = (struct decklink_cctx *)avctx->priv_data;
     struct decklink_ctx *ctx = (struct decklink_ctx *)cctx->ctx;
 #if BLACKMAGIC_DECKLINK_API_VERSION >= 0x0b000000

@@ -1216,13 +1216,16 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
     BMDVideoInputFormatChangedEvents events, IDeckLinkDisplayMode *mode,
     BMDDetectedVideoInputFormatFlags formatFlags)
 {
+    av_log(avctx, AV_LOG_INFO, "Format changed callback\n");
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
     ctx->bmd_mode = mode->GetDisplayMode();
     // check the C context member to make sure we set both raw_format and bmd_mode with data from the same format change callback
     if (ctx->autodetect) {
+        av_log(avctx, AV_LOG_INFO, "Format changed autodetect\n");
         if (!cctx->raw_format)
             ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
     } else {
+        av_log(avctx, AV_LOG_INFO, "Format changed hot\n");
         ctx->dli->PauseStreams();
         ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
         if (ctx->raw_format == (BMDPixelFormat)0)
@@ -1245,6 +1248,7 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
         return S_OK;
     }
 error:
+    av_log(avctx, AV_LOG_INFO, "Format changed error\n");
     ctx->dli->StopStreams();
     ctx->dli->DisableVideoInput();
     ctx->dli->DisableAudioInput();
