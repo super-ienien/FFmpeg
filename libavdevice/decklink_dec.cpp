@@ -986,7 +986,6 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                 av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
                 av_log(avctx, AV_LOG_INFO, "First frame system time : %lld\n", frameTime);
                 av_log(avctx, AV_LOG_INFO, "system time : %lld\n", uptime);
-                av_log(avctx, AV_LOG_INFO, "offset : %lld\n", uptime - frameTime);
                 av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", frameDuration);
             } else {
                 av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
