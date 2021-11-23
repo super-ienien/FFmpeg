@@ -24,7 +24,6 @@
 #include <atomic>
 #include <vector>
 #include <chrono>
-#include <string>
 
 using std::atomic;
 
@@ -1261,10 +1260,12 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
         if (!cctx->raw_format)
             ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
     } else {
-        std::string name;
-        mode->GetName(&name);
+        char*	displayModeName = NULL;
+        mode->GetName((const char**)&displayModeName);
         auto newMode = mode->GetDisplayMode();
                 av_log(avctx, AV_LOG_WARNING, "Decklink mode detection %s\n", name);
+        if (displayModeName)
+		    free(displayModeName);
         if (newMode != ctx->bmd_mode) {
             if (!wrong_mode) {
                 wrong_mode = 1;
