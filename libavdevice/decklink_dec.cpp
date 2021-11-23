@@ -717,6 +717,7 @@ private:
         AVFormatContext *avctx;
         decklink_ctx    *ctx;
         int no_video;
+        int wrong_mode;
         int no_frame_arrived;
         int64_t initial_video_pts;
         int64_t initial_audio_pts;
@@ -728,6 +729,7 @@ decklink_input_callback::decklink_input_callback(AVFormatContext *_avctx) : _ref
     decklink_cctx       *cctx = (struct decklink_cctx *)avctx->priv_data;
     ctx = (struct decklink_ctx *)cctx->ctx;
     no_video = 0;
+    wrong_mode = 0;
     no_frame_arrived = 1;
     initial_audio_pts = initial_video_pts = AV_NOPTS_VALUE;
 }
@@ -1251,11 +1253,33 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
     BMDVideoInputFormatChangedEvents events, IDeckLinkDisplayMode *mode,
     BMDDetectedVideoInputFormatFlags formatFlags)
 {
-    struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
-    ctx->bmd_mode = mode->GetDisplayMode();
-    // check the C context member to make sure we set both raw_format and bmd_mode with data from the same format change callback
-    if (!cctx->raw_format)
-        ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
+    if (ctx->autodetect) {
+        struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
+        ctx->bmd_mode = mode->GetDisplayMode();
+        // check the C context member to make sure we set both raw_format and bmd_mode with data from the same format change callback
+        if (!cctx->raw_format)
+            ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
+    } else {
+        auto newMode = mode->GetDisplayMode();
+        if (newMode != ctx->bmd_mode) {
+            if (!wrong_mode) {
+                wrong_mode = 1;
+                BMDTimeValue bmd_tb_num, bmd_tb_den;
+                BMDFieldDominance bmd_field_dominance = mode->GetFieldDominance();
+                mode->GetFrameRate(&bmd_tb_num, &bmd_tb_den);
+                AVRational mode_tb = av_make_q(bmd_tb_num, bmd_tb_den);
+
+                av_log(avctx, AV_LOG_WARNING, "Wrong decklink mode detected %d x %d with rate %.2f%s\n",
+                    mode->GetWidth(), mode->GetWHeight(), 1/av_q2d(mode_tb),
+                    (bmd_field_dominance==bmdLowerFieldFirst || bmd_field_dominance==bmdUpperFieldFirst)?"(i)":"");
+            }
+        } else {
+            if (wrong_mode) {
+                wrong_mode = 0;
+                av_log(avctx, AV_LOG_WARNING, "Input format returned\n");
+            }
+        }
+    }
     return S_OK;
 }
 
@@ -1599,7 +1623,7 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
 
     result = ctx->dli->EnableVideoInput(ctx->bmd_mode,
                                         ctx->raw_format,
-                                        bmdVideoInputFlagDefault);
+                                        bmdVideoInputEnableFormatDetection);
 
     if (result != S_OK) {
         av_log(avctx, AV_LOG_ERROR, "Cannot enable video input\n");
