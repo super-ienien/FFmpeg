@@ -1260,7 +1260,7 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
         if (!cctx->raw_format)
             ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
     } else {
-        const char* modeName = nullptr;
+        wchar_t* modeName = nullptr;
         mode->GetName(&modeName);
 
         auto newMode = mode->GetDisplayMode();
