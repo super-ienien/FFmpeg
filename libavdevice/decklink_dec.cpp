@@ -1270,7 +1270,7 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
                 AVRational mode_tb = av_make_q(bmd_tb_num, bmd_tb_den);
 
                 av_log(avctx, AV_LOG_WARNING, "Wrong decklink mode detected %d x %d with rate %.2f%s\n",
-                    mode->GetWidth(), mode->GetWHeight(), 1/av_q2d(mode_tb),
+                    mode->GetWidth(), mode->GetHeight(), 1/av_q2d(mode_tb),
                     (bmd_field_dominance==bmdLowerFieldFirst || bmd_field_dominance==bmdUpperFieldFirst)?"(i)":"");
             }
         } else {
