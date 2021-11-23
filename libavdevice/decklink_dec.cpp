@@ -919,7 +919,6 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     }
 
     if (ctx->autodetect) {
-        // Handle Video Frame
         if (videoFrame) {
             if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
                 if (!no_video) {
@@ -958,6 +957,22 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                 av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
                 cctx->wait_for_input = 0;
             } else {
+                if (videoFrame) {
+                    if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
+                        if (!no_video) {
+                            av_log(avctx, AV_LOG_WARNING, "No input signal detected\n");
+                        }
+                        no_video = 1;
+                    } else {
+                        if (no_video) {
+                            av_log(avctx, AV_LOG_WARNING, "Input returned\n");
+                        }
+                        no_video = 0;
+                        if (ctx->bmd_mode == bmdModeUnknown) {
+                            ctx->bmd_mode = AUTODETECT_DEFAULT_MODE;
+                        }
+                    }
+                }
                 ++ctx->dropped;
                 return S_OK;
             }
