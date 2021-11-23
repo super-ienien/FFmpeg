@@ -1260,12 +1260,12 @@ HRESULT decklink_input_callback::VideoInputFormatChanged(
         if (!cctx->raw_format)
             ctx->raw_format = (formatFlags & bmdDetectedVideoInputRGB444) ? bmdFormat8BitARGB : bmdFormat8BitYUV;
     } else {
-        char* displayModeName = NULL;
-        mode->GetName((const char**)&displayModeName);
+        BSTR modeNameBSTR;
+        mode->GetName(&modeNameBSTR);
+        _bstr_t modeName(modeNameBSTR);
+
         auto newMode = mode->GetDisplayMode();
-                av_log(avctx, AV_LOG_WARNING, "Decklink mode detection %s\n", displayModeName);
-        if (displayModeName)
-		    free(displayModeName);
+                av_log(avctx, AV_LOG_WARNING, "Decklink mode detection %s\n", (char*)modeName);
         if (newMode != ctx->bmd_mode) {
             if (!wrong_mode) {
                 wrong_mode = 1;
