@@ -66,8 +66,11 @@ struct decklink_cctx {
     int64_t vanc_queue_size;
     int copyts;
     int64_t timestamp_align;
+    int64_t abs_timestamp_align;
     int timing_offset;
     int wait_for_tc;
+    int wait_for_input;
+    int no_autodetect_timeout;
 };
 
 #endif /* AVDEVICE_DECKLINK_COMMON_C_H */
