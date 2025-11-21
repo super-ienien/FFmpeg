@@ -1,8 +1,0 @@
-{
-    "editor.formatOnSave": true,
-    "editor.formatOnPaste": true,
-    "C_Cpp.clang_format_path": "C:\\Program Files\\LLVM\\bin\\clang-format.exe",
-    "C_Cpp.clang_format_style": "file:C:\\Users\\dev\\.config\\ffmpeg.clang-format",
-    "clang-format.executable": "C:\\Program Files\\LLVM\\bin\\clang-format.exe",
-    "clang-format.style": "file:C:\\Users\\dev\\.config\\ffmpeg.clang-format"
-}
