@@ -23,6 +23,8 @@
 
 #include <atomic>
 #include <vector>
+#include <chrono>
+
 using std::atomic;
 
 /* Include internal.h first to avoid conflict between winsock.h (used by
@@ -52,6 +54,15 @@ extern "C" {
 #include <libzvbi.h>
 #endif
 }
+
+#if HAVE_TERMIOS_H
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/time.h>
+#include <termios.h>
+#elif HAVE_KBHIT
+#include <conio.h>
+#endif
 
 #include "decklink_common.h"
 #include "decklink_dec.h"
@@ -725,9 +736,60 @@ static int get_frame_timecode(AVFormatContext *avctx, decklink_ctx *ctx, AVTimec
     return ret;
 }
 
-HRESULT decklink_input_callback::VideoInputFrameArrived(
-    IDeckLinkVideoInputFrame *videoFrame, IDeckLinkAudioInputPacket *audioFrame)
+/* read a key without blocking */
+static int read_key(void)
 {
+    unsigned char ch;
+#if HAVE_TERMIOS_H
+    int n = 1;
+    struct timeval tv;
+    fd_set rfds;
+
+    FD_ZERO(&rfds);
+    FD_SET(0, &rfds);
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    n = select(1, &rfds, NULL, NULL, &tv);
+    if (n > 0) {
+        n = read(0, &ch, 1);
+        if (n == 1)
+            return ch;
+
+        return n;
+    }
+#elif HAVE_KBHIT
+#    if HAVE_PEEKNAMEDPIPE
+    static int is_pipe;
+    static HANDLE input_handle;
+    DWORD dw, nchars;
+    if(!input_handle){
+        input_handle = GetStdHandle(STD_INPUT_HANDLE);
+        is_pipe = !GetConsoleMode(input_handle, &dw);
+    }
+
+    if (is_pipe) {
+        /* When running under a GUI, you will end here. */
+        if (!PeekNamedPipe(input_handle, NULL, 0, NULL, &nchars, NULL)) {
+            // input pipe may have been closed by the program that ran ffmpeg
+            return -1;
+        }
+        //Read it
+        if(nchars != 0) {
+            read(0, &ch, 1);
+            return ch;
+        }else{
+            return -1;
+        }
+    }
+#    endif
+    if(kbhit())
+        return(getch());
+#endif
+    return -1;
+}
+
+HRESULT decklink_input_callback::VideoInputFrameArrived(
+    IDeckLinkVideoInputFrame *videoFrame, IDeckLinkAudioInputPacket *audioFrame) {
     void *frameBytes;
     void *audioFrameBytes;
     BMDTimeValue frameTime;
@@ -736,22 +798,111 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     int64_t video_pkt_pts, audio_pkt_pts;
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
 
+    if (no_frame_arrived) {
+        no_frame_arrived = 0;
+        if (cctx->wait_for_input) {
+            av_log(avctx, AV_LOG_INFO, "WAIT FOR USER INPUT KEY : r\n");
+        }
+    }
+
     if (ctx->autodetect) {
         if (videoFrame && !(videoFrame->GetFlags() & bmdFrameHasNoInputSource) &&
             ctx->bmd_mode == bmdModeUnknown)
         {
             ctx->bmd_mode = AUTODETECT_DEFAULT_MODE;
         }
+        // look for input r.
+        if (cctx->wait_for_input)
+        {
+            int key = read_key();
+            if (key == 'r') {
+                av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
+                cctx->wait_for_input = 0;
+            }
+        }
         return S_OK;
     }
 
-    // Drop the frames till system's timestamp aligns with the configured value.
-    if (0 == ctx->frameCount && cctx->timestamp_align) {
-        AVRational remainder = av_make_q(av_gettime() % cctx->timestamp_align, 1000000);
-        AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
-        if (av_cmp_q(remainder, frame_duration) > 0) {
-            ++ctx->dropped;
-            return S_OK;
+    if (0 == ctx->frameCount)
+    {
+        // Drop the frames till user input r.
+        if (cctx->wait_for_input)
+        {
+            int key = read_key();
+            if (key == 'r') {
+                av_log(NULL, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
+                cctx->wait_for_input = 0;
+            } else {
+                if (videoFrame) {
+                    if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
+                        if (!no_video) {
+                            av_log(avctx, AV_LOG_WARNING, "No input signal detected\n");
+                        }
+                        no_video = 1;
+                    } else {
+                        if (no_video) {
+                            av_log(avctx, AV_LOG_WARNING, "Input returned\n");
+                        }
+                        no_video = 0;
+                        if (ctx->bmd_mode == bmdModeUnknown) {
+                            ctx->bmd_mode = AUTODETECT_DEFAULT_MODE;
+                        }
+                    }
+                }
+                ++ctx->dropped;
+                return S_OK;
+            }
+        }
+
+        // Drop the frames till system's timestamp aligns with the configured value.
+        if (cctx->timestamp_align)
+        {
+            // av_log(avctx, AV_LOG_INFO, "Timestamp_align (%lld) - now %lld - remainder %lld\n", cctx->timestamp_align, av_gettime(), av_gettime() % cctx->timestamp_align);
+            AVRational remainder = av_make_q(av_gettime() % cctx->timestamp_align, 1000000);
+            AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
+            if (av_cmp_q(remainder, frame_duration) > 0)
+            {
+                ++ctx->dropped;
+                return S_OK;
+            }
+            else
+            {
+                int64_t now = av_gettime();
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
+            }
+        }
+        else if (cctx->abs_timestamp_align)
+        {
+            int64_t now = av_gettime();
+            AVRational remainder = av_make_q(cctx->abs_timestamp_align * 1000 - now, 1000000);
+            AVRational frame_duration = av_inv_q(ctx->video_st->r_frame_rate);
+            if (av_cmp_q(remainder, frame_duration) > 0) {
+                // av_log(avctx, AV_LOG_INFO, "Wait for wallclock (%lld) - now %lld - remainder %lld\n", cctx->abs_timestamp_align * 1000, now, cctx->abs_timestamp_align * 1000 - now);
+                ++ctx->dropped;
+                return S_OK;
+            }
+            else
+            {
+                int64_t now = av_gettime();
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
+            }
+        }
+        else
+        {
+            int64_t now = av_gettime();
+            auto uptime = std::chrono::microseconds(GetTickCount64());
+            if (videoFrame->GetHardwareReferenceTimestamp(1000000, &frameTime, &frameDuration) == S_OK) {
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now - frameDuration);
+                av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "First frame system time : %lld\n", frameTime);
+                av_log(avctx, AV_LOG_INFO, "system time : %lld\n", uptime);
+                av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", frameDuration);
+            } else {
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "First frame received at : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "First frame hardware time : %lld\n", now);
+                av_log(avctx, AV_LOG_INFO, "Frame duration : %lld\n", 0);
+            }
         }
     }
 
@@ -1016,14 +1167,42 @@ static int decklink_autodetect(struct decklink_cctx *cctx) {
     }
 
     // 3 second timeout
-    for (i = 0; i < 30; i++) {
-        av_usleep(100000);
-        /* Sometimes VideoInputFrameArrived is called without the
-         * bmdFrameHasNoInputSource flag before VideoInputFormatChanged.
-         * So don't break for bmd_mode == AUTODETECT_DEFAULT_MODE. */
-        if (ctx->bmd_mode != bmdModeUnknown &&
-            ctx->bmd_mode != AUTODETECT_DEFAULT_MODE)
-            break;
+    if (cctx->no_autodetect_timeout) {
+        while (1) {
+            av_usleep(100000);
+            if (cctx->wait_for_input)
+            {
+                int key = read_key();
+                if (key == 'r') {
+                    cctx->wait_for_input = 0;
+                }
+            }
+
+            /* Sometimes VideoInputFrameArrived is called without the
+            * bmdFrameHasNoInputSource flag before VideoInputFormatChanged.
+            * So don't break for bmd_mode == AUTODETECT_DEFAULT_MODE. */
+            if (ctx->bmd_mode != bmdModeUnknown &&
+                ctx->bmd_mode != AUTODETECT_DEFAULT_MODE)
+                break;
+        }
+    } else {
+        for (i = 0; i < 30; i++) {
+            av_usleep(100000);
+            if (cctx->wait_for_input)
+            {
+                int key = read_key();
+                if (key == 'r') {
+                    cctx->wait_for_input = 0;
+                }
+            }
+
+            /* Sometimes VideoInputFrameArrived is called without the
+             * bmdFrameHasNoInputSource flag before VideoInputFormatChanged.
+             * So don't break for bmd_mode == AUTODETECT_DEFAULT_MODE. */
+            if (ctx->bmd_mode != bmdModeUnknown &&
+                ctx->bmd_mode != AUTODETECT_DEFAULT_MODE)
+                break;
+        }
     }
 
     ctx->dli->PauseStreams();
