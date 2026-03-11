@@ -1814,6 +1814,48 @@ int ff_videomaster_extract_context(AVFormatContext     *avctx,
     return 0;
 }
 
+int ff_videomaster_find_board_index_by_id(
+    VideoMasterContext *videomaster_context, const char *board_id,
+    uint32_t *board_index)
+{
+    ULONG   nb_boards = 0;
+    char    pcie_id[64] = { 0 };
+
+    av_log(videomaster_context->avctx, AV_LOG_TRACE,
+           "ff_videomaster_find_board_index_by_id: IN (board_id=%s)\n",
+           board_id);
+
+    if (handle_vhd_status(videomaster_context->avctx,
+                           VHD_GetApiInfo(NULL, &nb_boards), "",
+                           "Failed to retrieve number of boards") != 0)
+        return AVERROR(EIO);
+
+    for (ULONG i = 0; i < nb_boards; i++)
+    {
+        if (handle_vhd_status(
+                videomaster_context->avctx,
+                VHD_GetPCIeIdentificationString(i, pcie_id), "",
+                "Failed to get PCIe identification string") != 0)
+            continue;
+
+        av_log(videomaster_context->avctx, AV_LOG_TRACE,
+               "Board %lu has PCIe id \"%s\"\n", (unsigned long)i, pcie_id);
+
+        if (strcmp(pcie_id, board_id) == 0)
+        {
+            *board_index = i;
+            av_log(videomaster_context->avctx, AV_LOG_INFO,
+                   "Board with id \"%s\" found at index %lu\n", board_id,
+                   (unsigned long)i);
+            return 0;
+        }
+    }
+
+    av_log(videomaster_context->avctx, AV_LOG_TRACE,
+           "ff_videomaster_find_board_index_by_id: OUT (not found)\n");
+    return AVERROR(ENODEV);
+}
+
 int ff_videomaster_get_api_info(VideoMasterContext *videomaster_context)
 {
     int av_error = AVERROR(EIO);

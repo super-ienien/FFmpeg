@@ -234,7 +234,8 @@ typedef struct VideoMasterContext
     enum AVVideoMasterChannelType
         channel_type;  ///< type of the channel (HDMI or SDI)
     enum AVVideoMasterTimeStampType
-        timestamp_source;  ///< source of the timestamp
+        timestamp_source;      ///< source of the timestamp
+    bool auto_set_ltc_input;   ///< auto-configure REF_IN for LTC on board
 
     uint32_t api_version;       ///< API version
     uint32_t number_of_boards;  ///< number of boards detected
@@ -317,7 +318,8 @@ typedef struct VideoMasterData
     int64_t nb_channels;       ///< number of channels to use
     int64_t sample_rate;       ///< sample rate of the audio stream
     int64_t sample_size;       ///< bits per sample in the audio stream
-    int64_t buffer_packing;    ///< buffer packing format
+    int64_t buffer_packing;        ///< buffer packing format
+    int64_t auto_set_ltc_input;    ///< auto-configure REF_IN for LTC on board
 } VideoMasterData;
 
 /**
@@ -384,6 +386,28 @@ int ff_videomaster_create_devices_infos_from_board_index(
 int ff_videomaster_extract_context(AVFormatContext     *avctx,
                                    VideoMasterData    **videomaster_data,
                                    VideoMasterContext **videomaster_context);
+
+/**
+ * @brief Finds the board index corresponding to a given PCIe identification
+ * string.
+ *
+ * This function enumerates all detected VideoMaster boards and compares their
+ * PCIe identification string (obtained via VHD_GetPCIeIdentificationString)
+ * with the provided board_id. If a match is found, the corresponding board
+ * index is stored in the output parameter.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context (used for
+ * logging).
+ * @param board_id The PCIe identification string to search for.
+ * @param board_index Pointer to a variable where the matching board index will
+ * be stored.
+ * @return 0 on success, or a negative AVERROR code on failure:
+ *         - AVERROR(EIO): API call failed.
+ *         - AVERROR(ENODEV): No board matches the given ID.
+ */
+int ff_videomaster_find_board_index_by_id(VideoMasterContext *videomaster_context,
+                                           const char        *board_id,
+                                           uint32_t          *board_index);
 
 /**
  * @brief Retrieves the API version and the number of boards detected by the

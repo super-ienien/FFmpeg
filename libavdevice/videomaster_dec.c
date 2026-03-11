@@ -500,6 +500,39 @@ int check_timestamp_source(VideoMasterContext *videomaster_context)
                    "the value of timestamp_source.\n");
             return AVERROR(EINVAL);
         }
+
+        if (videomaster_context->auto_set_ltc_input)
+        {
+            uint32_t nb_ref_in = 0;
+            VHD_GetBoardCapability(videomaster_context->board_handle,
+                                   VHD_CORE_BOARD_CAP_REF_IN, &nb_ref_in);
+
+            av_log(videomaster_context->avctx, AV_LOG_DEBUG,
+                   "auto_set_ltc_input: board has %u REF_IN connector(s)\n",
+                   nb_ref_in);
+
+            if (nb_ref_in >= 1)
+            {
+                VHD_SetBoardProperty(videomaster_context->board_handle,
+                                     VHD_SDI_BP_REF_IN0_DETECTION_ENABLE,
+                                     FALSE);
+                av_log(videomaster_context->avctx, AV_LOG_DEBUG,
+                       "auto_set_ltc_input: disabled REF_IN0 detection\n");
+            }
+
+            if (nb_ref_in >= 2)
+            {
+                VHD_SetBoardProperty(videomaster_context->board_handle,
+                                     VHD_SDI_BP_REF_IN1_DETECTION_ENABLE,
+                                     TRUE);
+                VHD_SetBoardProperty(videomaster_context->board_handle,
+                                     VHD_SDI_BP_GENLOCK_SOURCE,
+                                     VHD_GENLOCK_REF_IN1);
+                av_log(videomaster_context->avctx, AV_LOG_DEBUG,
+                       "auto_set_ltc_input: enabled REF_IN1 detection and "
+                       "set genlock source to REF_IN1\n");
+            }
+        }
     }
 
     if (videomaster_context->timestamp_source ==
@@ -625,9 +658,23 @@ int parse_command_line_arguments(AVFormatContext *avctx)
                    "\"%s\" is selected. Parse string to get board and channel "
                    "index.\n",
                    avctx->url);
-            if (sscanf(avctx->url, "stream %d on board %d",
-                       &videomaster_context->channel_index,
-                       &videomaster_context->board_index) != 2)
+            char board_id[64] = { 0 };
+            if (sscanf(avctx->url, "stream %d on board id %63s",
+                       &videomaster_context->channel_index, board_id) == 2)
+            {
+                int ret = ff_videomaster_find_board_index_by_id(
+                    videomaster_context, board_id,
+                    &videomaster_context->board_index);
+                if (ret < 0)
+                {
+                    av_log(avctx, AV_LOG_ERROR,
+                           "No board found with id \"%s\".\n", board_id);
+                    return ret;
+                }
+            }
+            else if (sscanf(avctx->url, "stream %d on board %d",
+                            &videomaster_context->channel_index,
+                            &videomaster_context->board_index) != 2)
             {
                 av_log(avctx, AV_LOG_ERROR,
                        "Unknown stream selected : \"%s\". Please use \"ffmpeg "
@@ -670,6 +717,9 @@ int parse_command_line_arguments(AVFormatContext *avctx)
 
         videomaster_context->video_buffer_packing =
             videomaster_data->buffer_packing;
+
+        videomaster_context->auto_set_ltc_input =
+            videomaster_data->auto_set_ltc_input;
     }
 
     av_log(avctx, AV_LOG_INFO,
@@ -1514,6 +1564,20 @@ static const AVOption options[] = {
       0,
       AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM,
       .unit = "buffer_packing_value" },
+    { "auto_set_ltc_input",
+      "Automatically configure the board REF_IN inputs when using "
+      "ltc_on_board timestamp source. When enabled and timestamp_source is "
+      "set to ltc_on_board, disables REF_IN0 detection and, if the board has "
+      "two REF_IN connectors, enables REF_IN1 detection and sets genlock "
+      "source to REF_IN1.",
+      OFFSET(auto_set_ltc_input),
+      AV_OPT_TYPE_BOOL,
+      { .i64 = 0 },
+      0,
+      1,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
+          AV_OPT_FLAG_AUDIO_PARAM,
+      NULL },
     { NULL },
 };
 
