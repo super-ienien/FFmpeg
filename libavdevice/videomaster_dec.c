@@ -23,8 +23,44 @@
 #include <VideoMasterHD_Dv.h>
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <conio.h>
+#endif
+
 #define OFFSET(x) offsetof(struct VideoMasterData, x)
 #define DEC       AV_OPT_FLAG_DECODING_PARAM
+
+/**
+ * @brief Non-blocking read of a single key from stdin.
+ * @return The character read, or -1 if no key is available.
+ */
+static int vm_read_key(void)
+{
+#ifdef _WIN32
+    static int is_pipe;
+    static HANDLE input_handle;
+    DWORD dw, nchars;
+    unsigned char ch;
+    if (!input_handle) {
+        input_handle = GetStdHandle(STD_INPUT_HANDLE);
+        is_pipe = !GetConsoleMode(input_handle, &dw);
+    }
+    if (is_pipe) {
+        if (!PeekNamedPipe(input_handle, NULL, 0, NULL, &nchars, NULL))
+            return -1;
+        if (nchars != 0) {
+            _read(0, &ch, 1);
+            return ch;
+        }
+        return -1;
+    }
+    if (_kbhit())
+        return _getch();
+#endif
+    return -1;
+}
 
 /** Static function declaration */
 /**
@@ -720,6 +756,9 @@ int parse_command_line_arguments(AVFormatContext *avctx)
 
         videomaster_context->auto_set_ltc_input =
             videomaster_data->auto_set_ltc_input;
+
+        videomaster_context->wait_for_input =
+            videomaster_data->wait_for_input;
     }
 
     av_log(avctx, AV_LOG_INFO,
@@ -970,6 +1009,9 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
 
     videomaster_context->return_video_next = true;
 
+    if (videomaster_context->wait_for_input)
+        av_log(avctx, AV_LOG_INFO, "WAIT FOR USER INPUT KEY : r\n");
+
     return 0;
 }
 
@@ -983,6 +1025,24 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     {
         av_log(avctx, AV_LOG_ERROR, "Failed to extract context\n");
         return AVERROR(EINVAL);
+    }
+
+    /* Drop frames until the user presses 'r' */
+    while (videomaster_context->wait_for_input)
+    {
+        int key;
+        if (ff_videomaster_get_data(videomaster_context) != 0)
+        {
+            av_log(avctx, AV_LOG_ERROR, "Failed to get data buffers\n");
+            return AVERROR(EIO);
+        }
+        ff_videomaster_release_data(videomaster_context);
+
+        key = vm_read_key();
+        if (key == 'r') {
+            av_log(avctx, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
+            videomaster_context->wait_for_input = 0;
+        }
     }
 
     if (videomaster_context->return_video_next)
@@ -1571,6 +1631,17 @@ static const AVOption options[] = {
       "two REF_IN connectors, enables REF_IN1 detection and sets genlock "
       "source to REF_IN1.",
       OFFSET(auto_set_ltc_input),
+      AV_OPT_TYPE_BOOL,
+      { .i64 = 0 },
+      0,
+      1,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
+          AV_OPT_FLAG_AUDIO_PARAM,
+      NULL },
+    { "wait_for_input",
+      "Wait for user to press 'r' key before starting capture. "
+      "Frames are dropped until the key is received on stdin.",
+      OFFSET(wait_for_input),
       AV_OPT_TYPE_BOOL,
       { .i64 = 0 },
       0,

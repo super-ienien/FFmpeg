@@ -25,7 +25,7 @@ VM_INCLUDE="${VM_INCLUDE:-../../sdk/VideoMaster/resources/include}"
 VM_LIB_ORIG="${VM_LIB:-../../sdk/VideoMaster/resources/lib}"
 
 # DeckLink SDK path
-DL_INCLUDE="${DL_INCLUDE:-../../sdk/Decklink/Blackmagic_DeckLink_SDK_15.3/Win/include}"
+DL_INCLUDE="${DL_INCLUDE:-../../sdk/Decklink/Blackmagic_DeckLink_SDK_14.2/Win/include}"
 
 # Number of parallel build jobs
 JOBS="${JOBS:-$(nproc)}"
@@ -123,7 +123,7 @@ echo ""
     \
     --enable-decklink \
     --enable-videomaster \
-    --extra-cflags="-I${VM_INCLUDE} -I${DL_INCLUDE}" \
+    --extra-cflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -Wno-error=incompatible-pointer-types" \
     --extra-cxxflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -fext-numeric-literals" \
     --extra-ldflags="-L${VM_LIB}" \
     \

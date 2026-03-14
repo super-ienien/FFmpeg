@@ -62,6 +62,9 @@ extern "C" {
 #include <termios.h>
 #elif HAVE_KBHIT
 #include <conio.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 #endif
 
 #include "decklink_common.h"
@@ -602,6 +605,7 @@ private:
         AVFormatContext *avctx;
         decklink_ctx    *ctx;
         int no_video;
+        int no_frame_arrived;
         int64_t initial_video_pts;
         int64_t initial_audio_pts;
         IDeckLinkVideoInputFrame* last_video_frame;
@@ -613,6 +617,7 @@ decklink_input_callback::decklink_input_callback(AVFormatContext *_avctx) : _ref
     decklink_cctx       *cctx = (struct decklink_cctx *)avctx->priv_data;
     ctx = (struct decklink_ctx *)cctx->ctx;
     no_video = 0;
+    no_frame_arrived = 1;
     initial_audio_pts = initial_video_pts = AV_NOPTS_VALUE;
     last_video_frame = nullptr;
 }
@@ -775,7 +780,7 @@ static int read_key(void)
         }
         //Read it
         if(nchars != 0) {
-            read(0, &ch, 1);
+            _read(0, &ch, 1);
             return ch;
         }else{
             return -1;
