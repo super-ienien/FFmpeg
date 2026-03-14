@@ -40,6 +40,8 @@ pacman -S --needed --noconfirm \
     mingw-w64-x86_64-x264 \
     mingw-w64-x86_64-x265 \
     mingw-w64-x86_64-fdk-aac \
+    mingw-w64-x86_64-aom \
+    mingw-w64-x86_64-libvpx \
     mingw-w64-x86_64-ffnvcodec-headers \
     mingw-w64-x86_64-tools-git \
     make \
@@ -123,9 +125,12 @@ echo ""
     \
     --enable-decklink \
     --enable-videomaster \
+    --pkg-config-flags="--static" \
     --extra-cflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -Wno-error=incompatible-pointer-types" \
     --extra-cxxflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -fext-numeric-literals" \
     --extra-ldflags="-L${VM_LIB}" \
+    --extra-ldexeflags="-static -static-libgcc -static-libstdc++" \
+    --extra-libs="-lole32 -loleaut32 -luuid -lshlwapi" \
     \
     "$@"
 
