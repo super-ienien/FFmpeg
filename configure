@@ -3753,6 +3753,8 @@ v4l2_outdev_suggest="libv4l2"
 vfwcap_indev_deps="vfw32 vfwcap_defines"
 videomaster_indev_deps="videomaster"
 videomaster_indev_extralibs="-lvideomasterhd -lvideomasterhd_audio"
+videomaster_outdev_deps="videomaster"
+videomaster_outdev_extralibs="-lvideomasterhd -lvideomasterhd_audio"
 xcbgrab_indev_deps="libxcb"
 xcbgrab_indev_suggest="libxcb_shm libxcb_shape libxcb_xfixes"
 xv_outdev_deps="xlib_xv xlib_x11 xlib_xext"
@@ -5811,6 +5813,7 @@ case $target_os in
         fi
         # Using framework instead of library for VideoMasterHD on macOS
         videomaster_indev_extralibs="-framework CoreFoundation -framework VideoMasterHD -framework VideoMasterHD_Audio"
+        videomaster_outdev_extralibs="-framework CoreFoundation -framework VideoMasterHD -framework VideoMasterHD_Audio"
         ;;
     msys*)
         die "Native MSYS builds are discouraged, please use the MINGW environment."

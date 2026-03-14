@@ -37,6 +37,7 @@
 #include <VideoMasterHD/VideoMasterHD_Core.h>
 #include <VideoMasterHD/VideoMasterHD_Dv.h>
 #include <VideoMasterHD/VideoMasterHD_Dv_Audio.h>
+#include <VideoMasterHD/VideoMasterHD_Keyer.h>
 #include <VideoMasterHD/VideoMasterHD_Sdi.h>
 #include <VideoMasterHD/VideoMasterHD_Sdi_Audio.h>
 #include <VideoMasterHD/VideoMasterHD_String.h>
@@ -44,6 +45,7 @@
 #include <VideoMasterHD_Core.h>
 #include <VideoMasterHD_Dv.h>
 #include <VideoMasterHD_Dv_Audio.h>
+#include <VideoMasterHD_Keyer.h>
 #include <VideoMasterHD_Sdi.h>
 #include <VideoMasterHD_Sdi_Audio.h>
 #include <VideoMasterHD_String.h>
@@ -161,6 +163,16 @@ enum AVVideoMasterBufferPacking
         VHD_BUFPACK_VIDEO_RGBA4444_10_LSB_PAD,
     AV_VIDEOMASTER_BUFFER_PACKING_RGBA4444_16 = VHD_BUFPACK_VIDEO_RGBA4444_16,
     AV_NB_VIDEOMASTER_BUFFER_PACKINGS
+};
+
+/**
+ * @brief Enumeration of VideoMaster keying modes for TX output.
+ */
+enum AVVideoMasterKeyingMode
+{
+    AV_VIDEOMASTER_KEYING_NONE,
+    AV_VIDEOMASTER_KEYING_EXTERNAL,
+    AV_VIDEOMASTER_KEYING_INTERNAL,
 };
 
 /**
@@ -293,6 +305,21 @@ typedef struct VideoMasterContext
     uint8_t *audio_buffer;           ///< buffer to store the audio data
     uint32_t audio_buffer_size;      ///< size of the audio buffer
     uint32_t audio_frames_received;  ///< number of audio frames received
+
+    // TX-specific fields
+    uint32_t queue_depth;    ///< buffer queue depth for TX
+    uint32_t preroll_count;  ///< number of preroll frames for TX
+    int      keying_mode;    ///< keying mode (AVVideoMasterKeyingMode)
+    bool     has_keyer;      ///< true if onboard keyer is detected
+    bool     use_yuvk;       ///< true if YUVK4224 packing for fill+key
+    bool     playback_started;  ///< true if TX stream has been started
+
+    uint8_t *audio_ring_buffer;     ///< ring buffer for TX audio embedding
+    uint32_t audio_ring_size;       ///< capacity of ring buffer in samples
+    uint32_t audio_ring_read;       ///< read position in ring buffer
+    uint32_t audio_ring_write;      ///< write position in ring buffer
+    uint32_t audio_ring_count;      ///< number of samples in ring buffer
+    uint32_t audio_block_size;      ///< block size for audio embedding
 
 } VideoMasterContext;
 
@@ -730,5 +757,82 @@ int ff_videomaster_stop_stream(VideoMasterContext *videomaster_context);
  */
 const char *ff_videomaster_timestamp_type_to_string(
     enum AVVideoMasterTimeStampType timestamp_type);
+
+/**
+ * @brief Disables loopback on the specified channel.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_disable_loopback_on_channel(
+    VideoMasterContext *videomaster_context);
+
+/**
+ * @brief Enables loopback on the specified channel.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_enable_loopback_on_channel(
+    VideoMasterContext *videomaster_context);
+
+/**
+ * @brief Opens a TX stream handle on the VideoMaster device.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_open_tx_stream_handle(
+    VideoMasterContext *videomaster_context);
+
+/**
+ * @brief Initializes the audio info structure for SDI audio.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context.
+ * @param audio_info Pointer to the VHD_AUDIOINFO structure to initialize.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_init_audio_info(VideoMasterContext *videomaster_context,
+                                    VHD_AUDIOINFO      *audio_info);
+
+/**
+ * @brief Releases the audio info structure.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context.
+ * @param audio_info Pointer to the VHD_AUDIOINFO structure to release.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_release_audio_info(VideoMasterContext *videomaster_context,
+                                       VHD_AUDIOINFO      *audio_info);
+
+/**
+ * @brief Handles VHD status codes and logs messages accordingly.
+ *
+ * @param avctx AVFormatContext pointer.
+ * @param vhd_status VHD_ERRORCODE status code.
+ * @param success_message Message to log on success.
+ * @param error_message Message to log on error.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_handle_vhd_status(AVFormatContext *avctx,
+                                      VHD_ERRORCODE    vhd_status,
+                                      const char      *success_message,
+                                      const char      *error_message);
+
+/**
+ * @brief Locks a slot handle on the VideoMaster stream.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_lock_slot(VideoMasterContext *videomaster_context);
+
+/**
+ * @brief Unlocks a slot handle on the VideoMaster stream.
+ *
+ * @param videomaster_context Pointer to the VideoMaster context.
+ * @return 0 on success, or negative AVERROR code on failure.
+ */
+int ff_videomaster_unlock_slot(VideoMasterContext *videomaster_context);
 
 #endif /* AVDEVICE_VIDEOMASTER_COMMON_H */

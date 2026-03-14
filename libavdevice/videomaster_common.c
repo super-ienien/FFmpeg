@@ -154,6 +154,17 @@ static AVDeviceInfo *create_device_info(VideoMasterContext *videomaster_context,
 static int disable_loopback_on_channel(VideoMasterContext *videomaster_context);
 
 /**
+ * @brief Enable loopback on the channel
+ *
+ * This function enables the loopback on the channel
+ * specified in the VideoMasterContext.
+ * @param videomaster_context  VideoMasterContext pointer to the
+ * VideoMasterContext
+ * @return int 0 on success, negative AVERROR code on failure
+ */
+static int enable_loopback_on_channel(VideoMasterContext *videomaster_context);
+
+/**
  * @brief    Formats the device description string.
  *
  * This function formats the device description string using the provided
@@ -340,6 +351,14 @@ static VHD_CORE_BOARDPROPERTY get_passive_loopback_property(int channel_index);
  * @return VHD_STREAMTYPE
  */
 static VHD_STREAMTYPE get_rx_stream_type_from_index(uint32_t index);
+
+/**
+ * @brief Get the tx stream type Videomaster enumeration from the channel index
+ *
+ * @param index Channel Index
+ * @return VHD_STREAMTYPE
+ */
+static VHD_STREAMTYPE get_tx_stream_type_from_index(uint32_t index);
 
 /**
  * @brief Get the sample rate from audio infoframe and aes status object
@@ -690,6 +709,73 @@ int disable_loopback_on_channel(VideoMasterContext *videomaster_context)
                                  get_passive_loopback_property(
                                      videomaster_context->channel_index),
                                  false),
+            "", "");
+    }
+
+    return 0;
+}
+
+int enable_loopback_on_channel(VideoMasterContext *videomaster_context)
+{
+    uint32_t has_passive_loopback = false;
+    uint32_t has_active_loopback = false;
+    uint32_t has_firmware_loopback = false;
+
+    handle_vhd_status(videomaster_context->avctx,
+                      VHD_GetBoardCapability(videomaster_context->board_handle,
+                                             VHD_CORE_BOARD_CAP_FIRMWARE_LOOPBACK,
+                                             &has_firmware_loopback),
+                      "", "");
+
+    if (has_firmware_loopback &&
+        get_firmware_loopback_property(videomaster_context->channel_index) !=
+            NB_VHD_CORE_BOARDPROPERTIES)
+    {
+        handle_vhd_status(
+            videomaster_context->avctx,
+            VHD_SetBoardProperty(videomaster_context->board_handle,
+                                 get_firmware_loopback_property(
+                                     videomaster_context->channel_index),
+                                 true),
+            "", "");
+        return 0;
+    }
+
+    handle_vhd_status(
+        videomaster_context->avctx,
+        VHD_GetBoardCapability(videomaster_context->board_handle,
+                               VHD_CORE_BOARD_CAP_PASSIVE_LOOPBACK,
+                               &has_passive_loopback),
+        "", "");
+    handle_vhd_status(videomaster_context->avctx,
+                      VHD_GetBoardCapability(videomaster_context->board_handle,
+                                             VHD_CORE_BOARD_CAP_ACTIVE_LOOPBACK,
+                                             &has_active_loopback),
+                      "", "");
+
+    if (has_active_loopback &&
+        get_active_loopback_property(videomaster_context->channel_index) !=
+            NB_VHD_CORE_BOARDPROPERTIES)
+    {
+        handle_vhd_status(
+            videomaster_context->avctx,
+            VHD_SetBoardProperty(videomaster_context->board_handle,
+                                 get_active_loopback_property(
+                                     videomaster_context->channel_index),
+                                 true),
+            "", "");
+    }
+
+    if (has_passive_loopback &&
+        get_passive_loopback_property(videomaster_context->channel_index) !=
+            NB_VHD_CORE_BOARDPROPERTIES)
+    {
+        handle_vhd_status(
+            videomaster_context->avctx,
+            VHD_SetBoardProperty(videomaster_context->board_handle,
+                                 get_passive_loopback_property(
+                                     videomaster_context->channel_index),
+                                 true),
             "", "");
     }
 
@@ -1210,6 +1296,39 @@ VHD_CORE_BOARDPROPERTY get_passive_loopback_property(int channel_index)
         return VHD_CORE_BP_BYPASS_RELAY_3;
     default:
         return NB_VHD_CORE_BOARDPROPERTIES;
+    }
+}
+
+VHD_STREAMTYPE get_tx_stream_type_from_index(uint32_t index)
+{
+    switch (index)
+    {
+    case 0:
+        return VHD_ST_TX0;
+    case 1:
+        return VHD_ST_TX1;
+    case 2:
+        return VHD_ST_TX2;
+    case 3:
+        return VHD_ST_TX3;
+    case 4:
+        return VHD_ST_TX4;
+    case 5:
+        return VHD_ST_TX5;
+    case 6:
+        return VHD_ST_TX6;
+    case 7:
+        return VHD_ST_TX7;
+    case 8:
+        return VHD_ST_TX8;
+    case 9:
+        return VHD_ST_TX9;
+    case 10:
+        return VHD_ST_TX10;
+    case 11:
+        return VHD_ST_TX11;
+    default:
+        return NB_VHD_STREAMTYPES;
     }
 }
 int get_sample_rate_from_audio_infoframe_and_aes_status(
@@ -2726,4 +2845,61 @@ const char *ff_videomaster_timestamp_type_to_string(
     default:
         return "unknown";
     }
+}
+
+int ff_videomaster_disable_loopback_on_channel(
+    VideoMasterContext *videomaster_context)
+{
+    return disable_loopback_on_channel(videomaster_context);
+}
+
+int ff_videomaster_enable_loopback_on_channel(
+    VideoMasterContext *videomaster_context)
+{
+    return enable_loopback_on_channel(videomaster_context);
+}
+
+int ff_videomaster_open_tx_stream_handle(
+    VideoMasterContext *videomaster_context)
+{
+    return handle_vhd_status(
+        videomaster_context->avctx,
+        VHD_OpenStreamHandle(videomaster_context->board_handle,
+                             get_tx_stream_type_from_index(
+                                 videomaster_context->channel_index),
+                             VHD_SDI_STPROC_JOINED, NULL,
+                             &videomaster_context->stream_handle, NULL),
+        "TX stream handle opened successfully",
+        "Failed to open TX stream handle");
+}
+
+int ff_videomaster_init_audio_info(VideoMasterContext *videomaster_context,
+                                    VHD_AUDIOINFO      *audio_info)
+{
+    return init_audio_info(videomaster_context, audio_info);
+}
+
+int ff_videomaster_release_audio_info(VideoMasterContext *videomaster_context,
+                                       VHD_AUDIOINFO      *audio_info)
+{
+    return release_audio_info(videomaster_context, audio_info);
+}
+
+int ff_videomaster_handle_vhd_status(AVFormatContext *avctx,
+                                      VHD_ERRORCODE    vhd_status,
+                                      const char      *success_message,
+                                      const char      *error_message)
+{
+    return handle_vhd_status(avctx, vhd_status, success_message,
+                             error_message);
+}
+
+int ff_videomaster_lock_slot(VideoMasterContext *videomaster_context)
+{
+    return lock_slot(videomaster_context);
+}
+
+int ff_videomaster_unlock_slot(VideoMasterContext *videomaster_context)
+{
+    return unlock_slot(videomaster_context);
 }

@@ -47,6 +47,8 @@ OBJS-$(CONFIG_SNDIO_INDEV)               += sndio_dec.o sndio.o
 OBJS-$(CONFIG_SNDIO_OUTDEV)              += sndio_enc.o sndio.o
 OBJS-$(CONFIG_VIDEOMASTER_INDEV)         += videomaster_dec.o \
                                             videomaster_common.o
+OBJS-$(CONFIG_VIDEOMASTER_OUTDEV)        += videomaster_enc.o \
+                                            videomaster_common.o
 OBJS-$(CONFIG_V4L2_INDEV)                += v4l2.o v4l2-common.o timefilter.o
 OBJS-$(CONFIG_V4L2_OUTDEV)               += v4l2enc.o v4l2-common.o
 OBJS-$(CONFIG_VFWCAP_INDEV)              += vfwcap.o
@@ -74,7 +76,8 @@ SKIPHEADERS-$(CONFIG_LIBPULSE)           += pulse_audio_common.h
 SKIPHEADERS-$(CONFIG_V4L2_INDEV)         += v4l2-common.h
 SKIPHEADERS-$(CONFIG_V4L2_OUTDEV)        += v4l2-common.h
 SKIPHEADERS-$(CONFIG_VIDEOMASTER)        += videomaster_dec.h \
-                                            videomaster_common.h
+                                            videomaster_common.h \
+                                            videomaster_enc.h
 SKIPHEADERS-$(CONFIG_ALSA)               += alsa.h
 SKIPHEADERS-$(CONFIG_SNDIO)              += sndio.h
 
