@@ -276,7 +276,8 @@ typedef struct VideoMasterContext
 
     bool
         return_video_next;  ///< true if the next video frame should be returned
-    int wait_for_input;     ///< wait for user input 'r' before capturing
+    int wait_for_input;         ///< wait for user input 'r' before capturing
+    int no_autodetect_timeout;  ///< do not timeout on signal autodetect
     float ltc_frame_rate;   ///< frame rate for LTC timestamp calculation
 
     // audio stream data
@@ -349,6 +350,7 @@ typedef struct VideoMasterData
     int64_t buffer_packing;        ///< buffer packing format
     int64_t auto_set_ltc_input;    ///< auto-configure REF_IN for LTC on board
     int64_t wait_for_input;        ///< wait for user input 'r' before capturing
+    int64_t no_autodetect_timeout; ///< do not timeout on signal autodetect
 } VideoMasterData;
 
 /**

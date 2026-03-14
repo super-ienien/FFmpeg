@@ -112,6 +112,7 @@ echo ""
     --disable-txtpages \
     \
     --disable-ffplay \
+    --disable-sdl2 \
     \
     --enable-libaom \
     --enable-libvpx \
@@ -125,14 +126,29 @@ echo ""
     \
     --enable-decklink \
     --enable-videomaster \
-    --pkg-config-flags="--static" \
     --extra-cflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -Wno-error=incompatible-pointer-types" \
     --extra-cxxflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -fext-numeric-literals" \
     --extra-ldflags="-L${VM_LIB}" \
-    --extra-ldexeflags="-static -static-libgcc -static-libstdc++" \
-    --extra-libs="-lole32 -loleaut32 -luuid -lshlwapi" \
+    --extra-libs="-lstdc++ -lole32 -loleaut32 -luuid -lshlwapi" \
     \
     "$@"
+
+# ─── Step 4b: Patch config.mak for fully static build ──────────────────────
+#
+# We cannot pass -static during configure because it breaks library detection
+# (configure tests use LDEXEFLAGS too, and -static conflicts with -DX264_API_IMPORTS).
+# Instead, we inject the static flags into config.mak after configure completes.
+#
+# 1. Add -static -static-libgcc -static-libstdc++ to LDEXEFLAGS
+# 2. Replace -lgcc_s (shared libgcc) with -lgcc (static) — comes from x265 pkg-config
+# 3. Remove -DX264_API_IMPORTS — configure sets it for DLL usage, but static x264 has
+#    non-prefixed symbols (without __imp_), so this define must be removed
+
+echo ""
+echo "=== Patching config.mak for fully static exe ==="
+sed -i 's/^LDEXEFLAGS=/LDEXEFLAGS=-static -static-libgcc -static-libstdc++ /' ffbuild/config.mak
+sed -i 's/-lgcc_s/-lgcc/g' ffbuild/config.mak
+sed -i 's/-DX264_API_IMPORTS//g' ffbuild/config.mak
 
 # ─── Step 5: Build ───────────────────────────────────────────────────────────
 

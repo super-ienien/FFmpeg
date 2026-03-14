@@ -271,10 +271,34 @@ int check_channel_index(VideoMasterContext *videomaster_context)
         }
         else if (!ff_videomaster_is_channel_locked(videomaster_context))
         {
-            av_log(videomaster_context->avctx, AV_LOG_TRACE,
-                   "Channel %d is not locked\n",
-                   videomaster_context->channel_index);
-            return 0;
+            if (videomaster_context->no_autodetect_timeout)
+            {
+                av_log(videomaster_context->avctx, AV_LOG_INFO,
+                       "Waiting for signal on channel %d...\n",
+                       videomaster_context->channel_index);
+                while (!ff_videomaster_is_channel_locked(videomaster_context))
+                    av_usleep(100000);
+                av_log(videomaster_context->avctx, AV_LOG_INFO,
+                       "Signal detected on channel %d\n",
+                       videomaster_context->channel_index);
+            }
+            else
+            {
+                int i;
+                for (i = 0; i < 30; i++)
+                {
+                    av_usleep(100000);
+                    if (ff_videomaster_is_channel_locked(videomaster_context))
+                        break;
+                }
+                if (i >= 30)
+                {
+                    av_log(videomaster_context->avctx, AV_LOG_TRACE,
+                           "Channel %d is not locked\n",
+                           videomaster_context->channel_index);
+                    return 0;
+                }
+            }
         }
         else
         {
@@ -759,6 +783,9 @@ int parse_command_line_arguments(AVFormatContext *avctx)
 
         videomaster_context->wait_for_input =
             videomaster_data->wait_for_input;
+
+        videomaster_context->no_autodetect_timeout =
+            videomaster_data->no_autodetect_timeout;
     }
 
     av_log(avctx, AV_LOG_INFO,
@@ -1642,6 +1669,17 @@ static const AVOption options[] = {
       "Wait for user to press 'r' key before starting capture. "
       "Frames are dropped until the key is received on stdin.",
       OFFSET(wait_for_input),
+      AV_OPT_TYPE_BOOL,
+      { .i64 = 0 },
+      0,
+      1,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
+          AV_OPT_FLAG_AUDIO_PARAM,
+      NULL },
+    { "no_autodetect_timeout",
+      "Do not exit on autodetect after 3sec. Wait indefinitely for "
+      "a signal to be detected on the input channel.",
+      OFFSET(no_autodetect_timeout),
       AV_OPT_TYPE_BOOL,
       { .i64 = 0 },
       0,
