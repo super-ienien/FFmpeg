@@ -40,7 +40,8 @@ typedef enum DecklinkPtsSource {
 typedef enum DecklinkSignalLossAction {
     SIGNAL_LOSS_NONE    = 1,
     SIGNAL_LOSS_REPEAT  = 2,
-    SIGNAL_LOSS_BARS    = 3
+    SIGNAL_LOSS_BARS    = 3,
+    SIGNAL_LOSS_BLACK   = 4
 } DecklinkSignalLossAction;
 
 struct decklink_cctx {
@@ -78,6 +79,7 @@ struct decklink_cctx {
     int wait_for_input;
     int no_autodetect_timeout;
     DecklinkSignalLossAction signal_loss_action;
+    int64_t default_video_mode;
 };
 
 #endif /* AVDEVICE_DECKLINK_COMMON_C_H */

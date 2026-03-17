@@ -313,7 +313,7 @@ int ff_decklink_set_format(AVFormatContext *avctx,
             ctx->bmd_tb_den = bmd_tb_den;
             ctx->bmd_tb_num = bmd_tb_num;
             ctx->bmd_field_dominance = bmd_field_dominance;
-            av_log(avctx, AV_LOG_INFO, "Found Decklink mode %d x %d with rate %.2f%s\n",
+            av_log(avctx, AV_LOG_INFO, "Found video mode %d x %d with rate %.2f%s\n",
                 bmd_width, bmd_height, 1/av_q2d(mode_tb),
                 (ctx->bmd_field_dominance==bmdLowerFieldFirst || ctx->bmd_field_dominance==bmdUpperFieldFirst)?"(i)":"");
         }

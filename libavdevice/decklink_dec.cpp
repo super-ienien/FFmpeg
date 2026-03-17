@@ -936,7 +936,14 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                                   ctx->video_st->time_base.den);
 
         if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
-            if (ctx->signal_loss_action == SIGNAL_LOSS_BARS && videoFrame->GetPixelFormat() == bmdFormat8BitYUV) {
+            if (ctx->signal_loss_action == SIGNAL_LOSS_BLACK) {
+                /* Fill with YUV black: U=0x80 Y=0x10 V=0x80 Y=0x10 */
+                int width  = videoFrame->GetWidth();
+                int height = videoFrame->GetHeight();
+                unsigned *p = (unsigned *)frameBytes;
+                for (int i = 0; i < (width * height / 2); i++)
+                    *p++ = 0x10801080;
+            } else if (ctx->signal_loss_action == SIGNAL_LOSS_BARS && videoFrame->GetPixelFormat() == bmdFormat8BitYUV) {
                 unsigned bars[8] = {
                     0xEA80EA80, 0xD292D210, 0xA910A9A5, 0x90229035,
                     0x6ADD6ACA, 0x51EF515A, 0x286D28EF, 0x10801080 };
@@ -1123,6 +1130,12 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         audioFrame->GetPacketTime(&audio_pts, ctx->audio_st->time_base.den);
         pkt.pts = audio_pkt_pts;
         pkt.dts = pkt.pts;
+
+        /* Generate silent audio when signal is lost and SIGNAL_LOSS_BLACK is set */
+        if (videoFrame && (videoFrame->GetFlags() & bmdFrameHasNoInputSource) &&
+            ctx->signal_loss_action == SIGNAL_LOSS_BLACK && audioFrameBytes) {
+            memset(audioFrameBytes, 0, pkt.size);
+        }
 
         //fprintf(stderr,"Audio Frame size %d ts %d\n", pkt.size, pkt.pts);
         pkt.flags       |= AV_PKT_FLAG_KEY;
@@ -1363,11 +1376,49 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
 
     if (!cctx->format_code) {
         if (decklink_autodetect(cctx) < 0) {
-            av_log(avctx, AV_LOG_ERROR, "Cannot Autodetect input stream or No signal\n");
-            ret = AVERROR(EIO);
-            goto error;
+            if (cctx->default_video_mode >= 0) {
+                /* Resolve mode index to format_code by iterating display modes */
+                IDeckLinkDisplayModeIterator *itermode = NULL;
+                IDeckLinkDisplayMode *mode = NULL;
+                int mode_idx = 0;
+                if (ctx->dli->GetDisplayModeIterator(&itermode) == S_OK) {
+                    while (itermode->Next(&mode) == S_OK) {
+                        if (mode_idx == cctx->default_video_mode) {
+                            char fc[5] = {0};
+                            uint32_t fc_raw = av_bswap32(mode->GetDisplayMode());
+                            memcpy(fc, &fc_raw, 4);
+                            cctx->format_code = av_strdup(fc);
+                            BMDTimeValue tb_num, tb_den;
+                            mode->GetFrameRate(&tb_num, &tb_den);
+                            av_log(avctx, AV_LOG_WARNING,
+                                   "No signal detected, using default mode %d: "
+                                   "%ldx%ld %.2ffps (format_code: %.4s)\n",
+                                   (int)cctx->default_video_mode,
+                                   mode->GetWidth(), mode->GetHeight(),
+                                   (double)tb_den / tb_num, fc);
+                            mode->Release();
+                            break;
+                        }
+                        mode->Release();
+                        mode_idx++;
+                    }
+                    itermode->Release();
+                }
+                if (!cctx->format_code) {
+                    av_log(avctx, AV_LOG_ERROR,
+                           "Invalid default_video_mode index: %" PRId64 "\n",
+                           cctx->default_video_mode);
+                    ret = AVERROR(EINVAL);
+                    goto error;
+                }
+            } else {
+                av_log(avctx, AV_LOG_ERROR, "Cannot Autodetect input stream or No signal\n");
+                ret = AVERROR(EIO);
+                goto error;
+            }
+        } else {
+            av_log(avctx, AV_LOG_INFO, "Autodetected the input mode\n");
         }
-        av_log(avctx, AV_LOG_INFO, "Autodetected the input mode\n");
     }
     if (ctx->raw_format == (BMDPixelFormat)0)
         ctx->raw_format = bmdFormat8BitYUV;

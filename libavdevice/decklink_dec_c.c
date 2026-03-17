@@ -104,10 +104,12 @@ static const AVOption options[] = {
     { "wait_for_tc",     "drop frames till a frame with timecode is received. TC format must be set", OFFSET(wait_for_tc), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, DEC },
     { "wait_for_input", "Wait till user input 'r'", OFFSET(wait_for_input), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DEC},
     { "no_autodetect_timeout",     "Do not exit on autodetect after 3sec", OFFSET(no_autodetect_timeout), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, DEC },
-    { "signal_loss_action", "action on signal loss", OFFSET(signal_loss_action), AV_OPT_TYPE_INT, { .i64 = SIGNAL_LOSS_BARS }, SIGNAL_LOSS_NONE, SIGNAL_LOSS_BARS, DEC, .unit = "signal_loss_action" },
+    { "signal_loss_action", "action on signal loss", OFFSET(signal_loss_action), AV_OPT_TYPE_INT, { .i64 = SIGNAL_LOSS_BARS }, SIGNAL_LOSS_NONE, SIGNAL_LOSS_BLACK, DEC, .unit = "signal_loss_action" },
     { "none", "do not do anything (usually leads to black frames)", 0,  AV_OPT_TYPE_CONST, { .i64 = SIGNAL_LOSS_NONE }, 0, 0, DEC, .unit = "signal_loss_action"},
     { "bars", "draw color bars (only supported for 8-bit signals)", 0,  AV_OPT_TYPE_CONST, { .i64 = SIGNAL_LOSS_BARS }, 0, 0, DEC, .unit = "signal_loss_action"},
     { "repeat", "repeat the last video frame", 0,  AV_OPT_TYPE_CONST, { .i64 = SIGNAL_LOSS_REPEAT }, 0, 0, DEC, .unit = "signal_loss_action"},
+    { "black", "generate black video and silent audio", 0,  AV_OPT_TYPE_CONST, { .i64 = SIGNAL_LOSS_BLACK }, 0, 0, DEC, .unit = "signal_loss_action"},
+    { "default_video_mode", "default display mode index for no-signal startup (from -list_formats output, -1=none)", OFFSET(default_video_mode), AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, INT_MAX, DEC },
     { NULL },
 };
 

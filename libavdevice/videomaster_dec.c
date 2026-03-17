@@ -12,15 +12,18 @@
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/time.h"
+#include "libavutil/timecode.h"
 
 #include "videomaster_common.h"
 
 #if defined(__APPLE__)
 #include <VideoMasterHD/VideoMasterHD_Core.h>
 #include <VideoMasterHD/VideoMasterHD_Dv.h>
+#include <VideoMasterHD/VideoMasterHD_Sdi_Timecode.h>
 #else
 #include <VideoMasterHD_Core.h>
 #include <VideoMasterHD_Dv.h>
+#include <VideoMasterHD_Sdi_Timecode.h>
 #endif
 
 #ifdef _WIN32
@@ -60,6 +63,172 @@ static int vm_read_key(void)
         return _getch();
 #endif
     return -1;
+}
+
+/**
+ * @brief Attaches the timecode from ctx->last_tc_* (populated by
+ * ff_videomaster_get_timestamp) to the video packet as S12M side data
+ * and "timecode" string metadata.
+ */
+static void attach_timecode_to_packet(AVFormatContext *avctx,
+                                      VideoMasterContext *ctx, AVPacket *pkt)
+{
+    AVRational frame_rate;
+    int flags;
+    AVTimecode avtc;
+    char tcstr[AV_TIMECODE_STR_SIZE];
+    const char *tcstr_ptr;
+
+    if (!ctx->last_tc_valid)
+        return;
+
+    frame_rate = av_make_q(ctx->video_frame_rate_num,
+                           ctx->video_frame_rate_den);
+    flags = (ctx->last_tc_flags & 0x01) ? AV_TIMECODE_FLAG_DROPFRAME : 0;
+
+    if (av_timecode_init_from_components(&avtc, frame_rate, flags,
+                                         ctx->last_tc_h, ctx->last_tc_m,
+                                         ctx->last_tc_s, ctx->last_tc_f,
+                                         avctx) < 0)
+        return;
+
+    /* S12M timecode side data (SMPTE 12M binary) */
+    {
+        uint32_t tc_data = av_timecode_get_smpte_from_framenum(&avtc, 0);
+        int size = sizeof(uint32_t) * 4;
+        uint32_t *sd = (uint32_t *)av_packet_new_side_data(
+            pkt, AV_PKT_DATA_S12M_TIMECODE, size);
+        if (sd) {
+            *sd       = 1;       /* one TC */
+            *(sd + 1) = tc_data; /* TC value */
+        }
+    }
+
+    /* String metadata */
+    tcstr_ptr = av_timecode_make_string(&avtc, tcstr, 0);
+    if (tcstr_ptr)
+    {
+        AVDictionary *meta = NULL;
+        if (av_dict_set(&meta, "timecode", tcstr_ptr, 0) >= 0) {
+            size_t meta_len;
+            uint8_t *packed = av_packet_pack_dictionary(meta, &meta_len);
+            av_dict_free(&meta);
+            if (packed) {
+                if (av_packet_add_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA,
+                                            packed, meta_len) < 0)
+                    av_freep(&packed);
+            }
+        }
+    }
+
+    /* Set stream metadata on first frame so muxer can create tmcd track */
+    if (!ctx->initial_tc_set && ctx->video_stream && tcstr_ptr)
+    {
+        char fps_str[16];
+        av_dict_set(&ctx->video_stream->metadata, "timecode", tcstr_ptr, 0);
+        snprintf(fps_str, sizeof(fps_str), "%.3f", ctx->last_tc_fps);
+        av_dict_set(&ctx->video_stream->metadata, "timecode_framerate", fps_str, 0);
+        av_dict_set(&ctx->video_stream->metadata, "timecode_locked",
+                    ctx->last_tc_locked ? "1" : "0", 0);
+        ctx->initial_tc_set = true;
+        av_log(avctx, AV_LOG_INFO,
+               "Initial timecode: %s (locked: %s, fps: %.3f)\n",
+               tcstr_ptr,
+               ctx->last_tc_locked ? "yes" : "no",
+               ctx->last_tc_fps);
+    }
+
+    av_log(avctx, AV_LOG_TRACE, "Timecode: %02d:%02d:%02d:%02d (locked: %s, fps: %.3f)\n",
+           ctx->last_tc_h, ctx->last_tc_m, ctx->last_tc_s, ctx->last_tc_f,
+           ctx->last_tc_locked ? "yes" : "no", ctx->last_tc_fps);
+}
+
+/**
+ * @brief Resolves a VHD_VIDEOSTANDARD mode index into video parameters.
+ * @return 0 on success, negative on failure.
+ */
+static int resolve_video_mode(AVFormatContext *avctx, int mode_index,
+                              uint32_t *width, uint32_t *height,
+                              uint32_t *fps_num, uint32_t *fps_den,
+                              bool *interlaced)
+{
+    ULONG w = 0, h = 0, framerate = 0;
+    BOOL32 ilaced = FALSE;
+    if (mode_index < 0) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid default_video_mode: %d\n", mode_index);
+        return AVERROR(EINVAL);
+    }
+    if (VHD_GetVideoCharacteristics((VHD_VIDEOSTANDARD)mode_index,
+                                    &w, &h, &ilaced, &framerate) != VHDERR_NOERROR) {
+        av_log(avctx, AV_LOG_ERROR,
+               "Unknown VideoMaster video mode index: %d\n", mode_index);
+        return AVERROR(EINVAL);
+    }
+    *width = w;
+    *height = h;
+    *interlaced = ilaced;
+    *fps_num = framerate * 1000;
+    *fps_den = 1000;
+    av_log(avctx, AV_LOG_INFO,
+           "Resolved video mode %d: %ux%u@%u%s\n",
+           mode_index, w, h, framerate, ilaced ? "i" : "p");
+    return 0;
+}
+
+/**
+ * @brief Allocates black video and silent audio buffers for signal loss.
+ */
+static int allocate_black_and_silent_buffers(VideoMasterContext *ctx)
+{
+    uint32_t i;
+    /* Video: YUV422 black = U=0x80 Y=0x10 V=0x80 Y=0x10 per 2 pixels */
+    ctx->black_video_buffer_size = ctx->video_width * ctx->video_height * 2;
+    ctx->black_video_buffer = av_malloc(ctx->black_video_buffer_size);
+    if (!ctx->black_video_buffer)
+        return AVERROR(ENOMEM);
+    for (i = 0; i + 3 < ctx->black_video_buffer_size; i += 4) {
+        ctx->black_video_buffer[i]     = 0x80; /* U */
+        ctx->black_video_buffer[i + 1] = 0x10; /* Y */
+        ctx->black_video_buffer[i + 2] = 0x80; /* V */
+        ctx->black_video_buffer[i + 3] = 0x10; /* Y */
+    }
+
+    /* Audio: silence = zero bytes, one video frame of samples */
+    if (ctx->has_audio && ctx->audio_sample_rate > 0 &&
+        ctx->audio_nb_channels > 0 && ctx->audio_sample_size > 0) {
+        uint32_t samples_per_frame = ctx->audio_sample_rate *
+                                     ctx->video_frame_rate_den /
+                                     ctx->video_frame_rate_num;
+        ctx->silent_audio_buffer_size = samples_per_frame *
+                                        ctx->audio_nb_channels *
+                                        (ctx->audio_sample_size / 8);
+        ctx->silent_audio_buffer = av_mallocz(ctx->silent_audio_buffer_size);
+        if (!ctx->silent_audio_buffer)
+            return AVERROR(ENOMEM);
+    }
+    return 0;
+}
+
+/**
+ * @brief Lists all known VideoMaster video standards with their properties.
+ */
+static void list_video_formats(AVFormatContext *avctx)
+{
+    int i;
+    av_log(avctx, AV_LOG_INFO,
+           "Supported VideoMaster video modes (use index with -default_video_mode):\n"
+           "\tindex\tresolution\tfps\ttype\tname\n");
+    for (i = 0; i < NB_VHD_VIDEOSTANDARDS; i++) {
+        ULONG w = 0, h = 0, framerate = 0;
+        BOOL32 interlaced = FALSE;
+        if (VHD_GetVideoCharacteristics((VHD_VIDEOSTANDARD)i,
+                                        &w, &h, &interlaced, &framerate) == VHDERR_NOERROR) {
+            av_log(avctx, AV_LOG_INFO, "\t%d\t%lux%lu\t\t%lu\t%s\t%s\n",
+                   i, w, h, framerate,
+                   interlaced ? "interlaced" : "progressive",
+                   VHD_VIDEOSTANDARD_ToPrettyString((VHD_VIDEOSTANDARD)i));
+        }
+    }
 }
 
 /** Static function declaration */
@@ -296,8 +465,60 @@ int check_channel_index(VideoMasterContext *videomaster_context)
                     av_log(videomaster_context->avctx, AV_LOG_TRACE,
                            "Channel %d is not locked\n",
                            videomaster_context->channel_index);
+                    /* Fall through to default format if signal_no_stop */
+                }
+            }
+
+            /* If still no signal, use default format or give up */
+            if (!ff_videomaster_is_channel_locked(videomaster_context))
+            {
+                struct VideoMasterData *data =
+                    (struct VideoMasterData *)videomaster_context->avctx->priv_data;
+                if (videomaster_context->signal_no_stop &&
+                    data->default_video_mode >= 0)
+                {
+                    if (resolve_video_mode(
+                            videomaster_context->avctx,
+                            (int)data->default_video_mode,
+                            &videomaster_context->video_width,
+                            &videomaster_context->video_height,
+                            &videomaster_context->video_frame_rate_num,
+                            &videomaster_context->video_frame_rate_den,
+                            &videomaster_context->video_interlaced) < 0)
+                        return AVERROR(EINVAL);
+
+                    videomaster_context->has_video = true;
+                    videomaster_context->video_codec = AV_CODEC_ID_RAWVIDEO;
+                    videomaster_context->video_pixel_format = AV_PIX_FMT_UYVY422;
+                    videomaster_context->video_buffer_packing =
+                        AV_VIDEOMASTER_BUFFER_PACKING_YUV422_8;
+
+                    /* Default audio: 48kHz 16-bit stereo */
+                    if (videomaster_context->audio_sample_rate == 0 ||
+                        videomaster_context->audio_sample_rate ==
+                            AV_VIDEOMASTER_SAMPLE_RATE_UNKNOWN)
+                        videomaster_context->audio_sample_rate = 48000;
+                    if (videomaster_context->audio_nb_channels == 0 ||
+                        (int32_t)videomaster_context->audio_nb_channels == -1)
+                        videomaster_context->audio_nb_channels = 2;
+                    if (videomaster_context->audio_sample_size == 0 ||
+                        videomaster_context->audio_sample_size ==
+                            AV_VIDEOMASTER_SAMPLE_SIZE_UNKNOWN)
+                        videomaster_context->audio_sample_size = 16;
+                    videomaster_context->audio_codec = AV_CODEC_ID_PCM_S16LE;
+                    videomaster_context->has_audio = true;
+
+                    videomaster_context->generating_black = true;
+                    av_log(videomaster_context->avctx, AV_LOG_INFO,
+                           "No signal - using default format %ux%u@%u/%u, "
+                           "generating black frames\n",
+                           videomaster_context->video_width,
+                           videomaster_context->video_height,
+                           videomaster_context->video_frame_rate_num,
+                           videomaster_context->video_frame_rate_den);
                     return 0;
                 }
+                return 0;
             }
         }
         else
@@ -494,14 +715,7 @@ int check_header_arguments(VideoMasterContext *videomaster_context)
         return AVERROR(EIO);
     }
 
-    if (check_timestamp_source(videomaster_context) != 0)
-    {
-        av_log(videomaster_context->avctx, AV_LOG_ERROR,
-               "Failed to check timestamp source integrity\n");
-        ff_videomaster_close_stream_handle(videomaster_context);
-        ff_videomaster_close_board_handle(videomaster_context);
-        return AVERROR(EIO);
-    }
+    check_timestamp_source(videomaster_context);
 
     return 0;
 }
@@ -517,10 +731,11 @@ int check_timestamp_source(VideoMasterContext *videomaster_context)
             AV_VIDEOMASTER_TIMESTAMP_HARDWARE &&
         !ff_videomaster_is_hardware_timestamp_supported(videomaster_context))
     {
-        av_log(videomaster_context->avctx, AV_LOG_ERROR,
-               "Hardware time stamping is not supported on the device. Please "
-               "change the value of timestamp_source.\n");
-        return AVERROR(EINVAL);
+        av_log(videomaster_context->avctx, AV_LOG_WARNING,
+               "Hardware time stamping is not supported on the device. "
+               "Falling back to system clock.\n");
+        videomaster_context->timestamp_source =
+            AV_VIDEOMASTER_TIMESTAMP_OSCILLATOR;
     }
     else if (videomaster_context->timestamp_source ==
              AV_VIDEOMASTER_TIMESTAMP_LTC_COMPANION_CARD)
@@ -528,23 +743,22 @@ int check_timestamp_source(VideoMasterContext *videomaster_context)
         if (!ff_videomaster_is_ltc_companion_card_supported(
                 videomaster_context))
         {
-            av_log(videomaster_context->avctx, AV_LOG_ERROR,
+            av_log(videomaster_context->avctx, AV_LOG_WARNING,
                    "LTC companion card feature is not supported on the device. "
-                   "LTC companion card timestamp sources is "
-                   "not available. Please change the value of "
-                   "timestamp_source.\n");
-            return AVERROR(EINVAL);
+                   "Falling back to system clock.\n");
+            videomaster_context->timestamp_source =
+                AV_VIDEOMASTER_TIMESTAMP_OSCILLATOR;
         }
         else
         {
             if (!ff_videomaster_is_ltc_companion_card_present(
                     videomaster_context))
             {
-                av_log(videomaster_context->avctx, AV_LOG_ERROR,
-                       "LTC companion card is not detected. Please check your "
-                       "hardware configuration or change the value "
-                       "of timestamp_source.\n");
-                return AVERROR(EINVAL);
+                av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                       "LTC companion card is not detected. "
+                       "Falling back to system clock.\n");
+                videomaster_context->timestamp_source =
+                    AV_VIDEOMASTER_TIMESTAMP_OSCILLATOR;
             }
         }
     }
@@ -554,11 +768,11 @@ int check_timestamp_source(VideoMasterContext *videomaster_context)
         if (!ff_videomaster_is_ltc_on_board_timestamp_supported(
                 videomaster_context))
         {
-            av_log(videomaster_context->avctx, AV_LOG_ERROR,
-                   "LTC on-board feature is not supported on the device. LTC "
-                   "on-board timestamp source is not available. Please change "
-                   "the value of timestamp_source.\n");
-            return AVERROR(EINVAL);
+            av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                   "LTC on-board feature is not supported on the device. "
+                   "Falling back to system clock.\n");
+            videomaster_context->timestamp_source =
+                AV_VIDEOMASTER_TIMESTAMP_OSCILLATOR;
         }
 
         if (videomaster_context->auto_set_ltc_input)
@@ -653,9 +867,11 @@ int check_timestamp_source(VideoMasterContext *videomaster_context)
             av_log(videomaster_context->avctx, AV_LOG_DEBUG,
                    "VHDERR = %d - %s\n%s\n", error_code,
                    VHD_ERRORCODE_ToPrettyString(error_code), pLastErrorMessage);
-            av_log(videomaster_context->avctx, AV_LOG_ERROR,
-                   "Cannot get LTC timecode.\n");
-            return AVERROR(EIO);
+            av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                   "Cannot get LTC timecode. "
+                   "Falling back to system clock.\n");
+            videomaster_context->timestamp_source =
+                AV_VIDEOMASTER_TIMESTAMP_OSCILLATOR;
         }
     }
     return 0;
@@ -784,8 +1000,14 @@ int parse_command_line_arguments(AVFormatContext *avctx)
         videomaster_context->wait_for_input =
             videomaster_data->wait_for_input;
 
+        videomaster_context->wait_for_tc =
+            videomaster_data->wait_for_tc;
+
         videomaster_context->no_autodetect_timeout =
             videomaster_data->no_autodetect_timeout;
+
+        videomaster_context->signal_no_stop =
+            videomaster_data->signal_no_stop;
     }
 
     av_log(avctx, AV_LOG_INFO,
@@ -980,6 +1202,8 @@ int ff_videomaster_read_close(AVFormatContext *avctx)
 
     if (videomaster_context)
     {
+        av_freep(&videomaster_context->black_video_buffer);
+        av_freep(&videomaster_context->silent_audio_buffer);
         av_freep(&videomaster_data->context);
         videomaster_data->context = NULL;
         videomaster_context = NULL;
@@ -998,6 +1222,11 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
     {
         av_log(avctx, AV_LOG_ERROR, "Failed to extract context\n");
         return AVERROR(EINVAL);
+    }
+
+    if (videomaster_data->list_formats) {
+        list_video_formats(avctx);
+        return AVERROR_EXIT;
     }
 
     if (parse_command_line_arguments(avctx) != 0)
@@ -1020,24 +1249,58 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
         return AVERROR(EIO);
     }
 
-    if ((videomaster_context->has_video || videomaster_context->has_audio) &&
-        (ff_videomaster_start_stream(videomaster_context) != 0))
+    if (videomaster_context->has_video)
     {
-        return handle_stream_error(videomaster_context,
-                                   "Failed to start stream\n", AVERROR(EIO));
+        av_log(avctx, AV_LOG_INFO, "Found video mode %u x %u with rate %.2f%s\n",
+               videomaster_context->video_width,
+               videomaster_context->video_height,
+               (double)videomaster_context->video_frame_rate_num /
+                   videomaster_context->video_frame_rate_den,
+               videomaster_context->video_interlaced ? "(i)" : "");
     }
 
-    if (setup_streams(videomaster_context) != 0)
+    if (videomaster_context->generating_black)
     {
-        return handle_stream_error(videomaster_context,
-                                   "Failed to setup Audio and Video streams\n",
-                                   AVERROR(EIO));
+        /* No hardware stream — just create AVStreams and black buffers */
+        if (setup_streams(videomaster_context) != 0)
+        {
+            return handle_stream_error(videomaster_context,
+                                       "Failed to setup Audio and Video streams\n",
+                                       AVERROR(EIO));
+        }
+        if (allocate_black_and_silent_buffers(videomaster_context) != 0)
+        {
+            av_log(avctx, AV_LOG_ERROR, "Failed to allocate black buffers\n");
+            return AVERROR(ENOMEM);
+        }
+    }
+    else
+    {
+        if ((videomaster_context->has_video || videomaster_context->has_audio) &&
+            (ff_videomaster_start_stream(videomaster_context) != 0))
+        {
+            return handle_stream_error(videomaster_context,
+                                       "Failed to start stream\n", AVERROR(EIO));
+        }
+
+        if (setup_streams(videomaster_context) != 0)
+        {
+            return handle_stream_error(videomaster_context,
+                                       "Failed to setup Audio and Video streams\n",
+                                       AVERROR(EIO));
+        }
+
+        /* Pre-allocate black buffers for signal loss during capture */
+        if (videomaster_context->signal_no_stop)
+            allocate_black_and_silent_buffers(videomaster_context);
     }
 
     videomaster_context->return_video_next = true;
 
     if (videomaster_context->wait_for_input)
         av_log(avctx, AV_LOG_INFO, "WAIT FOR USER INPUT KEY : r\n");
+    if (videomaster_context->wait_for_tc)
+        av_log(avctx, AV_LOG_INFO, "WAIT FOR LOCKED LTC TIMECODE\n");
 
     return 0;
 }
@@ -1054,37 +1317,180 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
         return AVERROR(EINVAL);
     }
 
-    /* Drop frames until the user presses 'r' */
-    while (videomaster_context->wait_for_input)
+    /* ── Unified wait loop: handles 'q', wait_for_input, and wait_for_tc ──
+     *
+     * Monitors stdin ('q' to quit, 'r' to start) and LTC lock status
+     * simultaneously on every frame. The LTC status is tracked live: it can
+     * go from locked to unlocked and back. When 'r' arrives, we only skip
+     * the wait_for_tc loop if the LTC is locked RIGHT NOW.
+     */
     {
-        int key;
-        if (ff_videomaster_get_data(videomaster_context) != 0)
-        {
-            av_log(avctx, AV_LOG_ERROR, "Failed to get data buffers\n");
-            return AVERROR(EIO);
-        }
-        ff_videomaster_release_data(videomaster_context);
+        int want_tc = videomaster_context->wait_for_tc;
+        int tc_is_locked = 0;
 
-        key = vm_read_key();
-        if (key == 'r') {
-            av_log(avctx, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
-            videomaster_context->wait_for_input = 0;
+        while (videomaster_context->wait_for_input ||
+               (want_tc && !tc_is_locked))
+        {
+            int key;
+
+            /* Consume a frame to keep the hardware running */
+            if (ff_videomaster_get_data(videomaster_context) != 0)
+            {
+                av_usleep(100000);
+                key = vm_read_key();
+                if (key == 'q' || key == 'Q') {
+                    av_log(avctx, AV_LOG_INFO, "Quit requested\n");
+                    return AVERROR_EOF;
+                }
+                continue;
+            }
+
+            /* Always probe LTC status (even during wait_for_input) */
+            if (want_tc)
+            {
+                BOOL32 locked = FALSE;
+                float  fps = 0;
+                VHD_TIMECODE tc_probe;
+                int prev_locked = tc_is_locked;
+                tc_is_locked = 0;
+
+                if (VHD_GetTimecode(videomaster_context->board_handle,
+                                    VHD_TC_SRC_LTC_ONBOARD, &locked,
+                                    &fps, &tc_probe) == VHDERR_NOERROR ||
+                    VHD_GetTimecode(videomaster_context->board_handle,
+                                    VHD_TC_SRC_LTC_COMPANION_CARD, &locked,
+                                    &fps, &tc_probe) == VHDERR_NOERROR)
+                {
+                    videomaster_context->ltc_frame_rate = fps;
+                    if (locked && fps > 0)
+                    {
+                        tc_is_locked = 1;
+                        if (!prev_locked)
+                            av_log(avctx, AV_LOG_INFO,
+                                   "LTC locked at %.3f fps - TC: %02d:%02d:%02d:%02d\n",
+                                   fps, tc_probe.Hour, tc_probe.Minute,
+                                   tc_probe.Second, tc_probe.Frame);
+                    }
+                    else if (prev_locked)
+                    {
+                        av_log(avctx, AV_LOG_WARNING, "LTC unlocked\n");
+                    }
+                }
+                else if (prev_locked)
+                {
+                    av_log(avctx, AV_LOG_WARNING, "LTC unlocked\n");
+                }
+            }
+
+            ff_videomaster_release_data(videomaster_context);
+
+            /* Check stdin */
+            key = vm_read_key();
+            if (key == 'q' || key == 'Q') {
+                av_log(avctx, AV_LOG_INFO, "Quit requested\n");
+                return AVERROR_EOF;
+            }
+            if (key == 'r' && videomaster_context->wait_for_input) {
+                av_log(avctx, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
+                videomaster_context->wait_for_input = 0;
+                /* If TC is already locked, loop exits immediately */
+            }
         }
+
+        if (want_tc)
+            videomaster_context->wait_for_tc = 0;
     }
 
+    /* ── Generating black frames (no signal) ── */
+    if (videomaster_context->generating_black)
+    {
+        int64_t frame_dur_us = (int64_t)videomaster_context->video_frame_rate_den *
+                               1000000 / videomaster_context->video_frame_rate_num;
+
+        if (videomaster_context->return_video_next)
+        {
+            videomaster_context->return_video_next = false;
+            if (av_new_packet(pkt, videomaster_context->black_video_buffer_size) < 0)
+                return AVERROR(ENOMEM);
+            memcpy(pkt->data, videomaster_context->black_video_buffer,
+                   videomaster_context->black_video_buffer_size);
+            pkt->stream_index = videomaster_context->video_stream->index;
+            videomaster_context->pts += frame_dur_us;
+            pkt->pts = videomaster_context->pts;
+            pkt->dts = pkt->pts;
+            pkt->duration = 1;
+        }
+        else
+        {
+            videomaster_context->return_video_next = true;
+            if (videomaster_context->has_audio &&
+                videomaster_context->silent_audio_buffer)
+            {
+                if (av_new_packet(pkt, videomaster_context->silent_audio_buffer_size) < 0)
+                    return AVERROR(ENOMEM);
+                memcpy(pkt->data, videomaster_context->silent_audio_buffer,
+                       videomaster_context->silent_audio_buffer_size);
+                pkt->stream_index = videomaster_context->audio_stream->index;
+                pkt->pts = videomaster_context->pts + 1;
+                pkt->dts = pkt->pts;
+                pkt->duration = 1;
+            }
+            /* Pace ourselves at the video frame rate */
+            av_usleep(frame_dur_us);
+
+            /* Try to re-acquire signal */
+            if (ff_videomaster_is_channel_locked(videomaster_context))
+            {
+                av_log(avctx, AV_LOG_INFO, "Signal detected, switching to live capture\n");
+                if (ff_videomaster_get_video_stream_properties(
+                        avctx, videomaster_context->board_handle,
+                        videomaster_context->stream_handle,
+                        videomaster_context->channel_index,
+                        &videomaster_context->channel_type,
+                        &videomaster_context->video_info,
+                        &videomaster_context->video_width,
+                        &videomaster_context->video_height,
+                        &videomaster_context->video_frame_rate_num,
+                        &videomaster_context->video_frame_rate_den,
+                        &videomaster_context->video_interlaced) == 0 &&
+                    ff_videomaster_open_stream_handle(videomaster_context) == 0 &&
+                    ff_videomaster_start_stream(videomaster_context) == 0)
+                {
+                    videomaster_context->generating_black = false;
+                }
+            }
+        }
+        return 0;
+    }
+
+    /* ── Normal capture path ── */
     if (videomaster_context->return_video_next)
     {
+        int get_data_result;
         videomaster_context->return_video_next = false;
-        if (ff_videomaster_get_data(videomaster_context) != 0)
+
+        get_data_result = ff_videomaster_get_data(videomaster_context);
+        if (get_data_result == AVERROR(EAGAIN) &&
+            videomaster_context->signal_no_stop &&
+            videomaster_context->black_video_buffer)
+        {
+            /* Signal lost during capture — switch to black frames */
+            if (!videomaster_context->generating_black)
+                av_log(avctx, AV_LOG_WARNING, "Signal lost, generating black frames\n");
+            videomaster_context->generating_black = true;
+            videomaster_context->return_video_next = true;
+            return ff_videomaster_read_packet(avctx, pkt);
+        }
+        else if (get_data_result != 0)
         {
             av_log(avctx, AV_LOG_ERROR, "Failed to get data buffers\n");
             return AVERROR(EIO);
         }
+
         if (videomaster_context->has_video)
         {
             if (av_new_packet(pkt, videomaster_context->video_buffer_size) < 0)
             {
-
                 av_log(avctx, AV_LOG_ERROR,
                        "Failed to allocate AVPacket for Video\n");
                 return AVERROR(ENOMEM);
@@ -1099,6 +1505,14 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                 pkt->pts = videomaster_context->pts;
                 pkt->dts = pkt->pts;
                 pkt->duration = 1;
+
+                attach_timecode_to_packet(avctx, videomaster_context, pkt);
+            }
+
+            if (videomaster_context->frames_received == 0)
+            {
+                int64_t now = av_gettime();
+                av_log(avctx, AV_LOG_INFO, "First frame wallclock : %lld\n", now);
             }
 
             if (ff_videomaster_get_slots_counter(videomaster_context) != 0)
@@ -1121,7 +1535,6 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
         {
             if (av_new_packet(pkt, videomaster_context->audio_buffer_size) < 0)
             {
-
                 av_log(avctx, AV_LOG_ERROR,
                        "Failed to allocate AVPacket for Audio\n");
                 return AVERROR(ENOMEM);
@@ -1131,9 +1544,6 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                 memcpy(pkt->data, videomaster_context->audio_buffer,
                        videomaster_context->audio_buffer_size);
                 pkt->stream_index = videomaster_context->audio_stream->index;
-                // Assign audio PTS as video PTS + 1 to ensure monotonic packet
-                // timestamps across all streams, as required by some FFmpeg
-                // muxers and filters.
                 pkt->pts = videomaster_context->pts + 1;
                 pkt->dts = pkt->pts;
                 pkt->duration = 1;
@@ -1155,6 +1565,15 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
 }
 
 static const AVOption options[] = {
+    { "list_formats",
+      "List all supported VideoMaster video modes and exit.",
+      OFFSET(list_formats),
+      AV_OPT_TYPE_BOOL,
+      { .i64 = 0 },
+      0,
+      1,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM,
+      NULL },
     { "board_index",
       "Index of the board to use. Only required when the ffmpeg input is set "
       "to dummy (-i dummy). If the input is a source name (from `ffmpeg "
@@ -1676,6 +2095,17 @@ static const AVOption options[] = {
       AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
           AV_OPT_FLAG_AUDIO_PARAM,
       NULL },
+    { "wait_for_tc",
+      "Wait for a stable locked LTC timecode before starting capture. "
+      "When combined with wait_for_input, waits for 'r' first, then for TC.",
+      OFFSET(wait_for_tc),
+      AV_OPT_TYPE_BOOL,
+      { .i64 = 0 },
+      0,
+      1,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
+          AV_OPT_FLAG_AUDIO_PARAM,
+      NULL },
     { "no_autodetect_timeout",
       "Do not exit on autodetect after 3sec. Wait indefinitely for "
       "a signal to be detected on the input channel.",
@@ -1686,6 +2116,29 @@ static const AVOption options[] = {
       1,
       AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
           AV_OPT_FLAG_AUDIO_PARAM,
+      NULL },
+    { "signal_no_stop",
+      "Do not stop when input signal is lost or absent. Generate black "
+      "video frames and silent audio instead. Requires default_video_format "
+      "when starting without signal.",
+      OFFSET(signal_no_stop),
+      AV_OPT_TYPE_BOOL,
+      { .i64 = 0 },
+      0,
+      1,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
+          AV_OPT_FLAG_AUDIO_PARAM,
+      NULL },
+    { "default_video_mode",
+      "Default VideoMaster video standard index (VHD_VIDEOSTANDARD) when "
+      "no signal is detected. Use -1 for none. "
+      "Required with signal_no_stop when no signal is present at startup.",
+      OFFSET(default_video_mode),
+      AV_OPT_TYPE_INT64,
+      { .i64 = -1 },
+      -1,
+      INT_MAX,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM,
       NULL },
     { NULL },
 };

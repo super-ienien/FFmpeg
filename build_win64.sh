@@ -27,6 +27,27 @@ VM_LIB_ORIG="${VM_LIB:-../../sdk/VideoMaster/resources/lib}"
 # DeckLink SDK path
 DL_INCLUDE="${DL_INCLUDE:-../../sdk/Decklink/Blackmagic_DeckLink_SDK_14.2/Win/include}"
 
+# CUDA Toolkit path — auto-detect or set manually
+# Prefer 12.x over 13.x (FFmpeg NPP filters need legacy non-_Ctx functions)
+# Create a local symlink to avoid spaces in path (breaks gcc -I flags)
+if [ -z "${CUDA_PATH}" ]; then
+    for d in /c/Program\ Files/NVIDIA\ GPU\ Computing\ Toolkit/CUDA/v12*/; do
+        [ -d "$d" ] && CUDA_PATH="$d" && break
+    done
+    if [ -z "${CUDA_PATH}" ]; then
+        for d in /c/Program\ Files/NVIDIA\ GPU\ Computing\ Toolkit/CUDA/v*/; do
+            [ -d "$d" ] && CUDA_PATH="$d" && break
+        done
+    fi
+fi
+if [ -n "${CUDA_PATH}" ]; then
+    CUDA_LOCAL="build_cuda"
+    rm -rf "${CUDA_LOCAL}"
+    ln -sf "${CUDA_PATH}" "${CUDA_LOCAL}"
+    CUDA_INCLUDE="${CUDA_LOCAL}/include"
+    CUDA_LIB="${CUDA_LOCAL}/lib/x64"
+fi
+
 # Number of parallel build jobs
 JOBS="${JOBS:-$(nproc)}"
 
@@ -43,6 +64,7 @@ pacman -S --needed --noconfirm \
     mingw-w64-x86_64-aom \
     mingw-w64-x86_64-libvpx \
     mingw-w64-x86_64-ffnvcodec-headers \
+    mingw-w64-x86_64-clang \
     mingw-w64-x86_64-tools-git \
     make \
     diffutils
@@ -65,6 +87,28 @@ for dll in "${VM_LIB_ORIG}"/*.dll; do
         dlltool -d "${deffile}" -l "${outlib}" -D "${name}.dll"
     fi
 done
+
+# ─── Step 2b: Generate MinGW import libraries for CUDA/NPP DLLs ───────────
+
+if [ -n "${CUDA_PATH}" ]; then
+    echo ""
+    echo "=== Generating MinGW import libraries for CUDA NPP ==="
+    CUDA_LIB_MINGW="build_cuda_lib"
+    mkdir -p "${CUDA_LIB_MINGW}"
+    for dll in "${CUDA_LOCAL}/bin"/npp*.dll; do
+        [ -f "${dll}" ] || continue
+        name="$(basename "${dll}" .dll)"
+        # Strip the 64_XX suffix: nppc64_12 -> nppc
+        short="$(echo "${name}" | sed 's/64_[0-9]*//')"
+        outlib="${CUDA_LIB_MINGW}/lib${short}.a"
+        if [ ! -f "${outlib}" ]; then
+            deffile="${CUDA_LIB_MINGW}/${short}.def"
+            echo "  ${name}.dll -> lib${short}.a"
+            gendef - "${dll}" > "${deffile}" 2>/dev/null
+            dlltool -d "${deffile}" -l "${outlib}" -D "$(basename "${dll}")"
+        fi
+    done
+fi
 
 # ─── Step 3: Generate DeckLink headers from IDL files ────────────────────────
 
@@ -90,7 +134,22 @@ echo "=== Configuring FFmpeg ==="
 echo "  VideoMaster include: ${VM_INCLUDE}"
 echo "  VideoMaster lib:     ${VM_LIB} (from ${VM_LIB_ORIG})"
 echo "  DeckLink include:    ${DL_INCLUDE}"
+if [ -n "${CUDA_PATH}" ]; then
+    echo "  CUDA Toolkit:        ${CUDA_PATH}"
+else
+    echo "  CUDA Toolkit:        not found (libnpp disabled)"
+fi
 echo ""
+
+# Build CUDA/NPP flags if toolkit is available
+CUDA_CFLAGS=""
+CUDA_LDFLAGS=""
+CUDA_CONFIGURE=""
+if [ -n "${CUDA_PATH}" ]; then
+    CUDA_CFLAGS="-I${CUDA_INCLUDE}"
+    CUDA_LDFLAGS="-L${CUDA_LIB_MINGW} -L${CUDA_LIB}"
+    CUDA_CONFIGURE="--enable-libnpp"
+fi
 
 ./configure \
     --arch=x86_64 \
@@ -123,12 +182,14 @@ echo ""
     --enable-nvdec \
     --enable-cuvid \
     --enable-ffnvcodec \
+    --enable-cuda-llvm \
+    ${CUDA_CONFIGURE} \
     \
     --enable-decklink \
     --enable-videomaster \
-    --extra-cflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -Wno-error=incompatible-pointer-types" \
+    --extra-cflags="-I${VM_INCLUDE} -I${DL_INCLUDE} ${CUDA_CFLAGS} -Wno-error=incompatible-pointer-types" \
     --extra-cxxflags="-I${VM_INCLUDE} -I${DL_INCLUDE} -fext-numeric-literals" \
-    --extra-ldflags="-L${VM_LIB}" \
+    --extra-ldflags="-L${VM_LIB} ${CUDA_LDFLAGS}" \
     --extra-libs="-lstdc++ -lole32 -loleaut32 -luuid -lshlwapi" \
     \
     "$@"
@@ -162,6 +223,20 @@ echo ""
 echo "=== Stripping binaries ==="
 strip -s ffmpeg.exe 2>/dev/null && echo "  Stripped ffmpeg.exe" || true
 strip -s ffprobe.exe 2>/dev/null && echo "  Stripped ffprobe.exe" || true
+
+# ─── Step 7: Copy runtime DLLs ────────────────────────────────────────────
+#
+# NPP libraries are proprietary NVIDIA DLLs — no static version exists.
+# Copy them next to ffmpeg.exe so it can find them at runtime.
+
+if [ -n "${CUDA_PATH}" ]; then
+    echo ""
+    echo "=== Copying CUDA NPP DLLs ==="
+    for dll in "${CUDA_LOCAL}/bin"/npp*.dll "${CUDA_LOCAL}/bin"/cudart*.dll; do
+        [ -f "${dll}" ] || continue
+        cp -u "${dll}" . && echo "  Copied $(basename "${dll}")"
+    done
+fi
 
 # ─── Done ────────────────────────────────────────────────────────────────────
 

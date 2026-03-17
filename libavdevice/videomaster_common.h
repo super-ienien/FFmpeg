@@ -277,6 +277,7 @@ typedef struct VideoMasterContext
     bool
         return_video_next;  ///< true if the next video frame should be returned
     int wait_for_input;         ///< wait for user input 'r' before capturing
+    int wait_for_tc;            ///< wait for locked LTC before capturing
     int no_autodetect_timeout;  ///< do not timeout on signal autodetect
     float ltc_frame_rate;   ///< frame rate for LTC timestamp calculation
 
@@ -298,6 +299,15 @@ typedef struct VideoMasterContext
 
     // sync data
     int64_t pts;
+    uint8_t last_tc_h;    ///< last timecode hours (set by get_timestamp)
+    uint8_t last_tc_m;    ///< last timecode minutes
+    uint8_t last_tc_s;    ///< last timecode seconds
+    uint8_t last_tc_f;    ///< last timecode frames
+    uint8_t last_tc_flags;  ///< last timecode flags (bit 0 = drop frame)
+    bool    last_tc_valid;  ///< true if last_tc fields are valid
+    bool    last_tc_locked; ///< true if timecode source is locked
+    float   last_tc_fps;    ///< timecode source frame rate
+    bool    initial_tc_set; ///< true once initial timecode is set on stream metadata
 
     uint8_t *video_buffer;       ///< buffer to store the video data
     uint32_t video_buffer_size;  ///< size of the video buffer
@@ -322,6 +332,14 @@ typedef struct VideoMasterContext
     uint32_t audio_ring_write;      ///< write position in ring buffer
     uint32_t audio_ring_count;      ///< number of samples in ring buffer
     uint32_t audio_block_size;      ///< block size for audio embedding
+
+    // Signal loss resilience
+    int      signal_no_stop;        ///< do not stop on signal loss, generate black
+    bool     generating_black;      ///< currently generating black frames
+    uint8_t *black_video_buffer;    ///< pre-allocated black video frame
+    uint32_t black_video_buffer_size; ///< size of the black video buffer
+    uint8_t *silent_audio_buffer;   ///< pre-allocated silent audio frame
+    uint32_t silent_audio_buffer_size; ///< size of the silent audio buffer
 
 } VideoMasterContext;
 
@@ -350,7 +368,11 @@ typedef struct VideoMasterData
     int64_t buffer_packing;        ///< buffer packing format
     int64_t auto_set_ltc_input;    ///< auto-configure REF_IN for LTC on board
     int64_t wait_for_input;        ///< wait for user input 'r' before capturing
+    int64_t wait_for_tc;           ///< wait for locked LTC before capturing
     int64_t no_autodetect_timeout; ///< do not timeout on signal autodetect
+    int64_t signal_no_stop;        ///< do not stop on signal loss
+    int64_t default_video_mode;    ///< default VHD_VIDEOSTANDARD index (-1=none)
+    int64_t list_formats;          ///< list supported video formats and exit
 } VideoMasterData;
 
 /**

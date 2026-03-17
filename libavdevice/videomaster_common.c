@@ -2221,6 +2221,13 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
         *timestamp = (uint64_t)((total_frames * 1000000.0) /
                                 videomaster_context->ltc_frame_rate);
 
+        videomaster_context->last_tc_h = time_code.Hour;
+        videomaster_context->last_tc_m = time_code.Minute;
+        videomaster_context->last_tc_s = time_code.Second;
+        videomaster_context->last_tc_f = time_code.Frame;
+        videomaster_context->last_tc_flags = time_code.Flags;
+        videomaster_context->last_tc_valid = true;
+
         av_log(videomaster_context->avctx, AV_LOG_DEBUG,
                "Timecode: %02d:%02d:%02d:%02d - Computed timestamp: %lli\n",
                time_code.Hour, time_code.Minute, time_code.Second,
@@ -2243,6 +2250,46 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
         *timestamp -= system_ts_base;
         av_log(videomaster_context->avctx, AV_LOG_DEBUG,
                "System timestamp: %lli\n", *timestamp);
+    }
+
+    /* Always try to read timecode from the slot, independently of PTS source.
+     * This populates last_tc_* for attach_timecode_to_packet().
+     * Also query board-level LTC for locked status and frame rate. */
+    {
+        VHD_TIMECODE slot_tc = {0};
+        VHD_TIMECODE_SOURCE tc_sources[] = {
+            VHD_TC_SRC_LTC_ONBOARD, VHD_TC_SRC_LTC_COMPANION_CARD
+        };
+        int i;
+        int got_slot_tc = 0;
+        for (i = 0; i < 2 && !got_slot_tc; i++)
+        {
+            if (VHD_GetSlotTimecode(videomaster_context->slot_handle,
+                                    tc_sources[i], &slot_tc) == VHDERR_NOERROR)
+            {
+                videomaster_context->last_tc_h = slot_tc.Hour;
+                videomaster_context->last_tc_m = slot_tc.Minute;
+                videomaster_context->last_tc_s = slot_tc.Second;
+                videomaster_context->last_tc_f = slot_tc.Frame;
+                videomaster_context->last_tc_flags = slot_tc.Flags;
+                videomaster_context->last_tc_valid = true;
+                got_slot_tc = 1;
+
+                /* Query board-level LTC for locked and framerate info */
+                {
+                    BOOL32 locked = FALSE;
+                    float  fps = 0;
+                    VHD_TIMECODE board_tc;
+                    if (VHD_GetTimecode(videomaster_context->board_handle,
+                                        tc_sources[i], &locked,
+                                        &fps, &board_tc) == VHDERR_NOERROR)
+                    {
+                        videomaster_context->last_tc_locked = locked;
+                        videomaster_context->last_tc_fps = fps;
+                    }
+                }
+            }
+        }
     }
 
     return 0;
