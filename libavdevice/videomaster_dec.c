@@ -1386,6 +1386,13 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
 
             /* Check stdin */
             key = vm_read_key();
+            if (key >= 0)
+                av_log(avctx, AV_LOG_DEBUG,
+                       "stdin key received: '%c' (0x%02x) "
+                       "[wait_for_input=%d, wait_for_tc=%d, tc_locked=%d]\n",
+                       key > 31 ? key : '?', key,
+                       videomaster_context->wait_for_input,
+                       want_tc, tc_is_locked);
             if (key == 'q' || key == 'Q') {
                 av_log(avctx, AV_LOG_INFO, "Quit requested\n");
                 return AVERROR_EOF;
