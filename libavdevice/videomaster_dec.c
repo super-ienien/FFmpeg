@@ -375,16 +375,28 @@ int check_audio_properties(VideoMasterContext *videomaster_context)
             videomaster_context->audio_sample_size ==
                 AV_VIDEOMASTER_SAMPLE_SIZE_UNKNOWN)
         {
-            av_log(videomaster_context->avctx, AV_LOG_WARNING,
-                   "Invalid audio properties: "
-                   "audio_nb_channels=%d, audio_sample_rate=%s, "
-                   "audio_sample_size=%s. Audio will be ignored if audio "
-                   "stream is present.\n",
-                   videomaster_context->audio_nb_channels,
-                   ff_videomaster_sample_rate_to_string(
-                       videomaster_context->audio_sample_rate),
-                   ff_videomaster_sample_size_to_string(
-                       videomaster_context->audio_sample_size));
+            if (channel_type == AV_VIDEOMASTER_CHANNEL_SDI ||
+                channel_type == AV_VIDEOMASTER_CHANNEL_ASISDI)
+            {
+                av_log(videomaster_context->avctx, AV_LOG_INFO,
+                       "SDI audio properties not specified, "
+                       "will default to 2ch 48kHz 16-bit. "
+                       "Use -nb_channels, -sample_rate, "
+                       "-sample_size to override.\n");
+            }
+            else
+            {
+                av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                       "Invalid audio properties: "
+                       "audio_nb_channels=%d, audio_sample_rate=%s, "
+                       "audio_sample_size=%s. Audio will be ignored if audio "
+                       "stream is present.\n",
+                       videomaster_context->audio_nb_channels,
+                       ff_videomaster_sample_rate_to_string(
+                           videomaster_context->audio_sample_rate),
+                       ff_videomaster_sample_size_to_string(
+                           videomaster_context->audio_sample_size));
+            }
         }
     }
     return 0;

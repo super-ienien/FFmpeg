@@ -2051,10 +2051,21 @@ int ff_videomaster_get_audio_stream_properties(
     }
     else
     {
+        /* For SDI, audio is embedded as ANC data (SMPTE 299M).
+         * There is no info frame to probe like HDMI.
+         * Use user-provided values or default to standard SDI audio. */
+        if ((int32_t)*nb_channels == -1 || *nb_channels == 0)
+            *nb_channels = 2;
+        if (*sample_rate == AV_VIDEOMASTER_SAMPLE_RATE_UNKNOWN)
+            *sample_rate = 48000;
+        if (*sample_size == AV_VIDEOMASTER_SAMPLE_SIZE_UNKNOWN)
+            *sample_size = 16;
+        *codec = (*sample_size == 24) ? AV_CODEC_ID_PCM_S24LE
+                                      : AV_CODEC_ID_PCM_S16LE;
 
-        av_log(avctx, AV_LOG_WARNING,
-               "Cannot retrieve audio stream "
-               "properties for SDI stream\n");
+        av_log(avctx, AV_LOG_INFO,
+               "SDI audio: %d channels @%dHz (%d bits)\n",
+               *nb_channels, *sample_rate, *sample_size);
     }
 
     av_log(avctx, AV_LOG_TRACE,
