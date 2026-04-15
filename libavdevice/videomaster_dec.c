@@ -1,5 +1,7 @@
 #include "videomaster_dec.h"
 
+#include <math.h>
+
 #include "libavcodec/packet_internal.h"
 #include "libavdevice/avdevice.h"
 #include "libavformat/avformat.h"
@@ -173,17 +175,29 @@ static void attach_timecode_to_packet(AVFormatContext *avctx,
     /* Set stream metadata on first frame so muxer can create tmcd track */
     if (!ctx->initial_tc_set && ctx->video_stream && tcstr_ptr)
     {
-        char fps_str[16];
+        char rate_str[16];
+        int rate_num, rate_den;
+        /* Encode LTC framerate as a rational num/den so it round-trips through
+         * the MP4 container (via \251tcr atom in track udta). Common LTC rates
+         * are either integer (24, 25, 30) or /1001 fractions (23.976, 29.97). */
+        if (fabsf(ctx->last_tc_fps - roundf(ctx->last_tc_fps)) < 0.01f) {
+            rate_num = (int)roundf(ctx->last_tc_fps);
+            rate_den = 1;
+        } else {
+            rate_num = (int)roundf(ctx->last_tc_fps * 1001.0f);
+            rate_den = 1001;
+        }
         av_dict_set(&ctx->video_stream->metadata, "timecode", tcstr_ptr, 0);
-        snprintf(fps_str, sizeof(fps_str), "%.3f", ctx->last_tc_fps);
-        av_dict_set(&ctx->video_stream->metadata, "timecode_framerate", fps_str, 0);
+        snprintf(rate_str, sizeof(rate_str), "%d/%d", rate_num, rate_den);
+        av_dict_set(&ctx->video_stream->metadata, "timecode_rate", rate_str, 0);
         av_dict_set(&ctx->video_stream->metadata, "timecode_locked",
                     ctx->last_tc_locked ? "1" : "0", 0);
         ctx->initial_tc_set = true;
         av_log(avctx, AV_LOG_INFO,
-               "Initial timecode: %s (locked: %s, fps: %.3f)\n",
+               "Initial timecode: %s (locked: %s, rate: %s, fps: %.3f)\n",
                tcstr_ptr,
                ctx->last_tc_locked ? "yes" : "no",
+               rate_str,
                ctx->last_tc_fps);
     }
 
@@ -1284,6 +1298,7 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
 {
     struct VideoMasterData    *videomaster_data = NULL;
     struct VideoMasterContext *videomaster_context = NULL;
+    void                      *board_init_lock = NULL;
 
     if (ff_videomaster_extract_context(avctx, &videomaster_data,
                                        &videomaster_context) != 0)
@@ -1310,8 +1325,14 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
         return AVERROR(EIO);
     }
 
+    /* Serialize the board-property setup phase across processes. The lock
+     * is released as soon as start_stream returns; capture is unaffected. */
+    board_init_lock = ff_videomaster_acquire_board_init_lock(
+        (uint32_t)videomaster_context->board_index, avctx);
+
     if (check_header_arguments(videomaster_context) != 0)
     {
+        ff_videomaster_release_board_init_lock(board_init_lock, avctx);
         av_log(avctx, AV_LOG_ERROR,
                "Failed to check header arguments integrity\n");
         return AVERROR(EIO);
@@ -1329,7 +1350,11 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
 
     if (videomaster_context->generating_black)
     {
-        /* No hardware stream — just create AVStreams and black buffers */
+        /* No hardware stream — release lock immediately, then create
+         * AVStreams and black buffers (no board state touched). */
+        ff_videomaster_release_board_init_lock(board_init_lock, avctx);
+        board_init_lock = NULL;
+
         if (setup_streams(videomaster_context) != 0)
         {
             return handle_stream_error(videomaster_context,
@@ -1347,9 +1372,15 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
         if ((videomaster_context->has_video || videomaster_context->has_audio) &&
             (ff_videomaster_start_stream(videomaster_context) != 0))
         {
+            ff_videomaster_release_board_init_lock(board_init_lock, avctx);
             return handle_stream_error(videomaster_context,
                                        "Failed to start stream\n", AVERROR(EIO));
         }
+
+        /* Board-property setup is done — release lock so other processes
+         * can proceed in parallel with the rest of our init. */
+        ff_videomaster_release_board_init_lock(board_init_lock, avctx);
+        board_init_lock = NULL;
 
         if (setup_streams(videomaster_context) != 0)
         {

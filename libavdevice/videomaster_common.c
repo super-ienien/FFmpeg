@@ -13,6 +13,96 @@
 #include <VideoMasterHD_String.h>
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+void *ff_videomaster_acquire_board_init_lock(uint32_t          board_index,
+                                             AVFormatContext  *avctx)
+{
+#ifdef _WIN32
+    char    mutex_name[64];
+    HANDLE  mutex;
+    DWORD   wait_result;
+    int64_t t_start, t_end;
+
+    /* Session-local namespace: works for any user without admin privileges,
+     * and is the right scope when all ffmpeg processes are launched by the
+     * same parent (typical liveedit deployment). For cross-session locking
+     * a "Global\\" prefix would be needed but requires SeCreateGlobalPrivilege. */
+    snprintf(mutex_name, sizeof(mutex_name),
+             "VideoMaster_Board_%u_InitLock", (unsigned)board_index);
+
+    mutex = CreateMutexA(NULL, FALSE, mutex_name);
+    if (!mutex)
+    {
+        av_log(avctx, AV_LOG_WARNING,
+               "Failed to create board init mutex \"%s\" (err=%lu); "
+               "concurrent init on board %u will not be serialized\n",
+               mutex_name, (unsigned long)GetLastError(),
+               (unsigned)board_index);
+        return NULL;
+    }
+
+    t_start = av_gettime_relative();
+    wait_result = WaitForSingleObject(mutex, 30000);  /* 30s safety cap */
+    t_end = av_gettime_relative();
+
+    switch (wait_result)
+    {
+    case WAIT_OBJECT_0:
+        av_log(avctx, AV_LOG_INFO,
+               "Acquired board init mutex \"%s\" after %lldms\n",
+               mutex_name, (long long)((t_end - t_start) / 1000));
+        return mutex;
+
+    case WAIT_ABANDONED:
+        /* Previous holder crashed without releasing — we hold it now but
+         * the board may be in an inconsistent state. Warn and proceed. */
+        av_log(avctx, AV_LOG_WARNING,
+               "Board init mutex \"%s\" was abandoned (previous process crashed "
+               "during init); board %u state may be inconsistent\n",
+               mutex_name, (unsigned)board_index);
+        return mutex;
+
+    case WAIT_TIMEOUT:
+        av_log(avctx, AV_LOG_WARNING,
+               "Board init mutex \"%s\" wait timed out after 30s; "
+               "proceeding without lock\n", mutex_name);
+        CloseHandle(mutex);
+        return NULL;
+
+    default:
+        av_log(avctx, AV_LOG_WARNING,
+               "Board init mutex \"%s\" wait failed (err=%lu); "
+               "proceeding without lock\n",
+               mutex_name, (unsigned long)GetLastError());
+        CloseHandle(mutex);
+        return NULL;
+    }
+#else
+    (void)board_index;
+    (void)avctx;
+    return NULL;
+#endif
+}
+
+void ff_videomaster_release_board_init_lock(void             *handle,
+                                            AVFormatContext  *avctx)
+{
+#ifdef _WIN32
+    if (handle)
+    {
+        ReleaseMutex((HANDLE)handle);
+        CloseHandle((HANDLE)handle);
+        av_log(avctx, AV_LOG_INFO, "Released board init mutex\n");
+    }
+#else
+    (void)handle;
+    (void)avctx;
+#endif
+}
+
 #define GET_AND_CHECK(func, avctx, ...)                                        \
     do                                                                         \
     {                                                                          \
@@ -3146,13 +3236,47 @@ int ff_videomaster_start_stream(VideoMasterContext *videomaster_context)
                                    &has_field_merge_capability),
             "", "");
         if (has_field_merge_capability) {
-            handle_vhd_status(
-                videomaster_context->avctx,
-                VHD_SetStreamProperty(videomaster_context->stream_handle,
-                                      VHD_CORE_SP_FIELD_MERGE, true),
-                "", "Unable to set field merge property for interlaced stream");
-            av_log(videomaster_context->avctx, AV_LOG_INFO,
-                   "ENABLE FIELD MERGING.\n");
+            /* FIELD_MERGE is a stream-shared OFF-LINE-ONLY property: the SDK
+             * only allows it to be modified while no stream is active on the
+             * board. When several processes init the same board concurrently,
+             * the first one sets it for everybody; the others read back the
+             * inherited value and skip the (forbidden) write. We always
+             * read first to know whether to attempt the write at all. */
+            uint32_t      current_field_merge = 0;
+            VHD_ERRORCODE get_status = VHD_GetStreamProperty(
+                videomaster_context->stream_handle,
+                VHD_CORE_SP_FIELD_MERGE, &current_field_merge);
+
+            if (get_status == VHDERR_NOERROR && current_field_merge) {
+                av_log(videomaster_context->avctx, AV_LOG_INFO,
+                       "Field merge already enabled (inherited from another "
+                       "stream on this board).\n");
+            } else {
+                VHD_ERRORCODE set_status = VHD_SetStreamProperty(
+                    videomaster_context->stream_handle,
+                    VHD_CORE_SP_FIELD_MERGE, true);
+                if (set_status == VHDERR_NOERROR) {
+                    av_log(videomaster_context->avctx, AV_LOG_INFO,
+                           "ENABLE FIELD MERGING.\n");
+                } else if (set_status == VHDERR_OFFLINEPROPERTY) {
+                    /* Another stream is already online on the board and has
+                     * field_merge=false. We can't change it. Warn loudly
+                     * because this leaves us in field-rate (50Hz) mode for
+                     * an interlaced signal — caller may want to re-init in
+                     * a different order. */
+                    av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                           "Field merge cannot be set: another stream is "
+                           "already online on the board with field_merge=false. "
+                           "Interlaced capture will deliver one slot per "
+                           "field (50Hz) instead of per frame (25Hz).\n");
+                } else {
+                    /* Unexpected error — fall through to the standard logger. */
+                    handle_vhd_status(
+                        videomaster_context->avctx, set_status,
+                        "", "Unable to set field merge property for "
+                            "interlaced stream");
+                }
+            }
         } else {
             av_log(videomaster_context->avctx, AV_LOG_WARNING,
                    "Field merge not supported on "
@@ -3277,16 +3401,18 @@ int ff_videomaster_start_stream(VideoMasterContext *videomaster_context)
                       "signal");
     }
 
-    GET_AND_CHECK(handle_vhd_status, videomaster_context->avctx,
-                  videomaster_context->avctx,
-                  VHD_StartStream(videomaster_context->stream_handle),
-                  "Stream started successfully", "Failed to start stream");
-
-    /* Start the disjoined ANC stream if in disjoined mode */
+    /* Configure the disjoined ANC stream BEFORE starting either stream.
+     * Reason: in disjoined mode the video stream and the ANC stream share
+     * the SDI signal but are clocked independently. Any wall-clock delay
+     * between VHD_StartStream(video) and VHD_StartStream(anc) translates
+     * into a permanent N-slot offset between the two queues, which the
+     * resync loop in get_data then has to absorb by dropping slots — and
+     * those dropped slots are real video frames the user wanted to
+     * capture. Doing all the SetStreamProperty calls upfront lets the two
+     * VHD_StartStream calls happen back-to-back. */
     if (videomaster_context->disjoined_streams &&
         videomaster_context->anc_stream_handle)
     {
-        /* Configure ANC stream with same SDI properties */
         if (videomaster_context->channel_type != AV_VIDEOMASTER_CHANNEL_HDMI)
         {
             VHD_SetStreamProperty(
@@ -3308,6 +3434,31 @@ int ff_videomaster_start_stream(VideoMasterContext *videomaster_context)
         VHD_SetStreamProperty(videomaster_context->anc_stream_handle,
                               VHD_CORE_SP_IO_TIMEOUT, 10000);
 
+        /* Match the video stream's buffer queue depth. The SDK default is
+         * 4, which overflows in ~160ms — much shorter than the encoder
+         * warm-up delay under multi-channel load. When the ANC queue
+         * overflows, the SDK silently drops the oldest slots, so by the
+         * time get_data resumes the ANC queue starts at a later timestamp
+         * than the video queue — forcing the resync loop to drop several
+         * video frames to catch up (visible as a freeze proportional to
+         * warm-up duration, i.e. to the number of concurrent encoders). */
+        VHD_SetStreamProperty(videomaster_context->anc_stream_handle,
+                              VHD_CORE_SP_BUFFERQUEUE_DEPTH, 32);
+        VHD_SetStreamProperty(videomaster_context->anc_stream_handle,
+                              VHD_CORE_SP_BUFFERQUEUE_PRELOAD, 0);
+    }
+
+    /* Start both streams as close together in wall-clock time as possible.
+     * No log line, no error check, no allocation between the two calls —
+     * just a tight pair of VHD_StartStream invocations. */
+    GET_AND_CHECK(handle_vhd_status, videomaster_context->avctx,
+                  videomaster_context->avctx,
+                  VHD_StartStream(videomaster_context->stream_handle),
+                  "Stream started successfully", "Failed to start stream");
+
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->anc_stream_handle)
+    {
         GET_AND_CHECK(handle_vhd_status, videomaster_context->avctx,
                       videomaster_context->avctx,
                       VHD_StartStream(videomaster_context->anc_stream_handle),

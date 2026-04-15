@@ -4129,8 +4129,12 @@ static int mov_write_track_udta_tag(AVIOContext *pb, MOVMuxContext *mov,
     if (ret < 0)
         return ret;
 
-    if (mov->mode & (MODE_MP4|MODE_MOV))
+    if (mov->mode & (MODE_MP4|MODE_MOV)) {
         mov_write_track_metadata(pb_buf, st, "name", "title");
+        /* Custom deltacast/videomaster LTC timecode metadata. */
+        mov_write_track_metadata(pb_buf, st, "\251tcr", "timecode_rate");
+        mov_write_track_metadata(pb_buf, st, "\251tcl", "timecode_locked");
+    }
 
     if (mov->mode & MODE_MP4) {
         if ((ret = mov_write_track_kinds(pb_buf, st)) < 0)

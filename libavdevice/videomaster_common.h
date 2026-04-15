@@ -392,6 +392,42 @@ typedef struct VideoMasterData
 } VideoMasterData;
 
 /**
+ * @brief Acquires a system-wide named mutex serializing board-level
+ * VHD_SetBoardProperty calls across processes for a given board index.
+ *
+ * Required because several pieces of the init sequence write to board-level
+ * properties that are SHARED by every channel on the board (REF_IN detection,
+ * GENLOCK_SOURCE, SYSTEM_TIME_CLK_TYPE, BLACKBURST detection). When N
+ * ffmpeg processes spin up at the same time on different channels of the
+ * same board, those writes race and one process can end up with a
+ * misconfigured slot timestamp clock — producing slot system times that
+ * do not increment, which results in PTS that barely advance and a muxer
+ * EINVAL crash.
+ *
+ * The lock is per-board (named with the index) so two boards can init in
+ * parallel. It is held only across the brief board-property setup phase,
+ * not for the lifetime of the capture.
+ *
+ * The function never returns an error to the caller — on any platform or
+ * runtime failure it logs a warning and returns NULL, and the caller will
+ * proceed unsynchronized. Always pair with ff_videomaster_release_board_init_lock,
+ * including on the NULL path (release is a no-op for NULL).
+ *
+ * @param board_index Board index to lock.
+ * @param avctx       AVFormatContext for logging context (may be NULL).
+ * @return Opaque handle to release later, or NULL if no lock could be taken.
+ */
+void *ff_videomaster_acquire_board_init_lock(uint32_t          board_index,
+                                             AVFormatContext  *avctx);
+
+/**
+ * @brief Releases the lock taken by ff_videomaster_acquire_board_init_lock.
+ * Safe to call with NULL.
+ */
+void ff_videomaster_release_board_init_lock(void             *handle,
+                                            AVFormatContext  *avctx);
+
+/**
  * @brief Closes the handle to the VideoMaster board.
  *
  * This function releases the handle to the VideoMaster board specified in the
