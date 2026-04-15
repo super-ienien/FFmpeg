@@ -241,6 +241,21 @@ typedef struct VideoMasterContext
     void *stream_handle;  ///> handle to the stream
     void *slot_handle;    ///> handle to the slot
 
+    // Disjoined streams mode
+    int   disjoined_streams;    ///< use separate video and ANC streams
+    void *anc_stream_handle;    ///> handle to the disjoined ANC stream
+    void *anc_slot_handle;      ///> handle to the ANC slot
+    uint8_t *disjoined_video_copy;     ///< private copy of video data (slots released early)
+    uint32_t disjoined_video_copy_size; ///< allocated size of disjoined_video_copy
+    bool     disjoined_first_after_wait; ///< drain one frame after wait loop
+    uint32_t disjoined_resync_total;  ///< cumulative resync count (drift monitor)
+    uint32_t disjoined_resync_log_counter; ///< frames since last drift warning
+
+    /* Diagnostic: log buffer queue filling for 5s after 'r'/'f' received.
+     * Set to av_gettime_relative() when the wait_for_input loop unblocks,
+     * reset to 0 once the 5s window has elapsed. */
+    int64_t diag_record_start_us;
+
     uint32_t board_index;    ///< index of the board to use
     uint32_t channel_index;  ///< index of the stream to use
     enum AVVideoMasterChannelType
@@ -373,6 +388,7 @@ typedef struct VideoMasterData
     int64_t signal_no_stop;        ///< do not stop on signal loss
     int64_t default_video_mode;    ///< default VHD_VIDEOSTANDARD index (-1=none)
     int64_t list_formats;          ///< list supported video formats and exit
+    int64_t disjoined_streams;     ///< use disjoined video + ANC streams
 } VideoMasterData;
 
 /**

@@ -66,6 +66,55 @@ static int vm_read_key(void)
 }
 
 /**
+ * @brief Diagnostic logger: while within the 5s window that follows the
+ * reception of 'r'/'f' in the wait loop, dumps the current buffer queue
+ * filling along with frame number, timecode and pts. Auto-disables once
+ * the 5s window expires.
+ *
+ * @param ctx   VideoMaster context (must have diag_record_start_us set
+ *              non-zero to actually log; otherwise this is a no-op).
+ * @param phase Short tag identifying the call site ("trigger", "drain",
+ *              "video", ...). Echoed in the log line.
+ */
+static void log_buffer_queue_diag(VideoMasterContext *ctx, const char *phase)
+{
+    int64_t  now;
+    uint32_t video_filling = 0, anc_filling = 0;
+
+    if (ctx->diag_record_start_us == 0)
+        return;
+
+    now = av_gettime_relative();
+    if (now - ctx->diag_record_start_us > 5000000LL) {
+        av_log(ctx->avctx, AV_LOG_INFO,
+               "DIAG: 5s window elapsed, stop logging buffer queue\n");
+        ctx->diag_record_start_us = 0;
+        return;
+    }
+
+    if (ctx->stream_handle)
+        VHD_GetStreamProperty(ctx->stream_handle,
+                              VHD_CORE_SP_BUFFERQUEUE_FILLING,
+                              &video_filling);
+    if (ctx->disjoined_streams && ctx->anc_stream_handle)
+        VHD_GetStreamProperty(ctx->anc_stream_handle,
+                              VHD_CORE_SP_BUFFERQUEUE_FILLING,
+                              &anc_filling);
+
+    av_log(ctx->avctx, AV_LOG_INFO,
+           "DIAG[%-7s] t=+%4lldms frame=%-6u tc=%02d:%02d:%02d:%02d "
+           "pts=%-12lld video_q=%2u%s%u\n",
+           phase,
+           (long long)((now - ctx->diag_record_start_us) / 1000),
+           ctx->frames_received,
+           ctx->last_tc_h, ctx->last_tc_m, ctx->last_tc_s, ctx->last_tc_f,
+           (long long)ctx->pts,
+           (unsigned)video_filling,
+           ctx->disjoined_streams ? " anc_q=" : "",
+           (unsigned)anc_filling);
+}
+
+/**
  * @brief Attaches the timecode from ctx->last_tc_* (populated by
  * ff_videomaster_get_timestamp) to the video packet as S12M side data
  * and "timecode" string metadata.
@@ -1020,6 +1069,13 @@ int parse_command_line_arguments(AVFormatContext *avctx)
 
         videomaster_context->signal_no_stop =
             videomaster_data->signal_no_stop;
+
+        videomaster_context->disjoined_streams =
+            videomaster_data->disjoined_streams;
+
+        if (videomaster_context->disjoined_streams)
+            av_log(avctx, AV_LOG_INFO,
+                   "Disjoined streams mode requested\n");
     }
 
     av_log(avctx, AV_LOG_INFO,
@@ -1096,7 +1152,7 @@ int setup_video_stream(VideoMasterContext *videomaster_context)
         av_stream->codecpar->bit_rate = videomaster_context->video_bit_rate;
         av_stream->codecpar->codec_id = videomaster_context->video_codec;
         av_stream->codecpar->format = videomaster_context->video_pixel_format;
-        av_stream->codecpar->field_order = AV_FIELD_PROGRESSIVE;
+        av_stream->codecpar->field_order = videomaster_context->video_interlaced ? AV_FIELD_TT : AV_FIELD_PROGRESSIVE;
 
         avpriv_set_pts_info(av_stream, 64, 1, 1000000); /* 64 bits pts in us */
 
@@ -1308,6 +1364,9 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
     }
 
     videomaster_context->return_video_next = true;
+    videomaster_context->disjoined_first_after_wait =
+        videomaster_context->disjoined_streams &&
+        (videomaster_context->wait_for_input || videomaster_context->wait_for_tc);
 
     if (videomaster_context->wait_for_input)
         av_log(avctx, AV_LOG_INFO, "WAIT FOR USER INPUT KEY : r\n");
@@ -1331,7 +1390,7 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
 
     /* ── Unified wait loop: handles 'q', wait_for_input, and wait_for_tc ──
      *
-     * Monitors stdin ('q' to quit, 'r' to start) and LTC lock status
+     * Monitors stdin ('q' to quit, 'r' to start, 'f' to force start) and LTC lock status
      * simultaneously on every frame. The LTC status is tracked live: it can
      * go from locked to unlocked and back. When 'r' arrives, we only skip
      * the wait_for_tc loop if the LTC is locked RIGHT NOW.
@@ -1409,15 +1468,36 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                 av_log(avctx, AV_LOG_INFO, "Quit requested\n");
                 return AVERROR_EOF;
             }
-            if (key == 'r' && videomaster_context->wait_for_input) {
-                av_log(avctx, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
-                videomaster_context->wait_for_input = 0;
-                /* If TC is already locked, loop exits immediately */
+            if (videomaster_context->wait_for_input) {
+                if (key == 'r' || key == 'f') {
+                    av_log(avctx, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
+                    videomaster_context->wait_for_input = 0;
+                    /* Arm the buffer-queue diagnostic for the next 5 s */
+                    videomaster_context->diag_record_start_us =
+                        av_gettime_relative();
+                    log_buffer_queue_diag(videomaster_context, "trigger");
+                }
+                if (key == 'f') {
+                    if (want_tc) {
+                        av_log(avctx, AV_LOG_INFO, "FORCE START.\n");
+                        want_tc = 0;
+                    }
+                }
             }
         }
+    }
 
-        if (want_tc)
-            videomaster_context->wait_for_tc = 0;
+    /* In disjoined mode, drain one frame after the wait loop to ensure
+     * the first real capture frame is not a duplicate of the last
+     * consumed frame from the wait loop. */
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->disjoined_first_after_wait)
+    {
+        videomaster_context->disjoined_first_after_wait = false;
+        if (ff_videomaster_get_data(videomaster_context) == 0) {
+            log_buffer_queue_diag(videomaster_context, "drain");
+            ff_videomaster_release_data(videomaster_context);
+        }
     }
 
     /* ── Generating black frames (no signal) ── */
@@ -1519,8 +1599,11 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                 memcpy(pkt->data, videomaster_context->video_buffer,
                        videomaster_context->video_buffer_size);
                 pkt->stream_index = videomaster_context->video_stream->index;
-                ff_videomaster_get_timestamp(videomaster_context,
-                                             &videomaster_context->pts);
+                /* In disjoined mode, timestamp was already extracted inside
+                 * ff_videomaster_get_data before the slot was unlocked. */
+                if (!videomaster_context->disjoined_streams)
+                    ff_videomaster_get_timestamp(videomaster_context,
+                                                 &videomaster_context->pts);
                 pkt->pts = videomaster_context->pts;
                 pkt->dts = pkt->pts;
                 pkt->duration = 1;
@@ -1545,6 +1628,8 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                        videomaster_context->frames_received,
                        videomaster_context->frames_dropped);
             }
+
+            log_buffer_queue_diag(videomaster_context, "video");
         }
     }
     else
@@ -2158,6 +2243,18 @@ static const AVOption options[] = {
       -1,
       INT_MAX,
       AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM,
+      NULL },
+    { "disjoined_streams",
+      "Open separate disjoined video and ANC streams instead of a single "
+      "joined stream. Slot timestamps are compared to ensure video and ANC "
+      "buffers are temporally synchronized. SDI only.",
+      OFFSET(disjoined_streams),
+      AV_OPT_TYPE_BOOL,
+      { .i64 = 0 },
+      0,
+      1,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
+          AV_OPT_FLAG_AUDIO_PARAM,
       NULL },
     { NULL },
 };

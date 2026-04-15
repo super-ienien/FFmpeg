@@ -2,6 +2,7 @@
 #include "libavutil/avstring.h"
 #include "libavutil/log.h"
 #include "libavutil/mem.h"
+#include "libavutil/time.h"
 #include <stdio.h>
 
 #if defined(__APPLE__)
@@ -1512,6 +1513,7 @@ int get_video_buffer(VideoMasterContext *videomaster_context)
         "Failed to retrieve video slot buffer");
 }
 
+
 static int get_videomaster_enumeration_value_for_timestamp_source(
     enum AVVideoMasterTimeStampType type)
 {
@@ -1559,10 +1561,15 @@ int handle_vhd_status(AVFormatContext *avctx, VHD_ERRORCODE vhd_status,
     {
         char pLastErrorMessage[VHD_MAX_ERROR_STRING_SIZE] = { 0 };
         VHD_GetLastErrorMessage(pLastErrorMessage, VHD_MAX_ERROR_STRING_SIZE);
-        av_log(avctx, AV_LOG_DEBUG, "VHDERR = %d - %s\n%s\n", vhd_status,
-               VHD_ERRORCODE_ToPrettyString(vhd_status), pLastErrorMessage);
         if (strcmp(error_message, "") != 0)
-            av_log(avctx, AV_LOG_ERROR, "%s.\n", error_message);
+            av_log(avctx, AV_LOG_ERROR, "%s (VHDERR=%d %s). %s\n",
+                   error_message, vhd_status,
+                   VHD_ERRORCODE_ToPrettyString(vhd_status),
+                   pLastErrorMessage);
+        else
+            av_log(avctx, AV_LOG_DEBUG, "VHDERR = %d - %s\n%s\n", vhd_status,
+                   VHD_ERRORCODE_ToPrettyString(vhd_status),
+                   pLastErrorMessage);
         return AVERROR(EIO);
     }
     return 0;
@@ -1807,11 +1814,29 @@ int ff_videomaster_close_board_handle(VideoMasterContext *videomaster_context)
 
 int ff_videomaster_close_stream_handle(VideoMasterContext *videomaster_context)
 {
-    int return_code = handle_vhd_status(videomaster_context->avctx,
-                                        VHD_CloseStreamHandle(
-                                            videomaster_context->stream_handle),
-                                        "Stream handle closed successfully",
-                                        "Failed to close stream handle");
+    int return_code;
+
+    /* Free disjoined video copy buffer */
+    av_freep(&videomaster_context->disjoined_video_copy);
+    videomaster_context->disjoined_video_copy_size = 0;
+
+    /* Close disjoined ANC stream handle */
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->anc_stream_handle)
+    {
+        handle_vhd_status(videomaster_context->avctx,
+                          VHD_CloseStreamHandle(
+                              videomaster_context->anc_stream_handle),
+                          "Disjoined ANC stream handle closed successfully",
+                          "Failed to close disjoined ANC stream handle");
+        videomaster_context->anc_stream_handle = NULL;
+    }
+
+    return_code = handle_vhd_status(videomaster_context->avctx,
+                                    VHD_CloseStreamHandle(
+                                        videomaster_context->stream_handle),
+                                    "Stream handle closed successfully",
+                                    "Failed to close stream handle");
     videomaster_context->stream_handle = NULL;
     return return_code;
 }
@@ -2109,28 +2134,330 @@ enum AVVideoMasterChannelType ff_videomaster_get_channel_type_from_index(
 
 int ff_videomaster_get_data(VideoMasterContext *videomaster_context)
 {
-    int lock_slot_status = lock_slot(videomaster_context);
-
     av_log(videomaster_context->avctx, AV_LOG_TRACE,
            "ff_videomaster_get_data: IN\n");
 
-    if (lock_slot_status == AVERROR(EAGAIN))
+    /* ── Disjoined streams mode: lock video and ANC slots separately,
+     *    then verify temporal alignment via VHD_GetSlotSystemTime ── */
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->anc_stream_handle)
     {
-        av_log(videomaster_context->avctx, AV_LOG_WARNING,
-               "Timeout while waiting for "
-               "slot lock\n");
-        return AVERROR(EAGAIN);
+        int lock_video, lock_anc;
+        LONGLONG ts_video = 0, ts_anc = 0;
+        LONGLONG ts_diff;
+
+        /* Sync tolerance: half a frame period (us), floor 500 us.
+         * Two slots from the same SDI frame will have very close but not
+         * identical system timestamps due to independent processing paths. */
+        LONGLONG sync_tolerance_us = 500;
+        if (videomaster_context->video_frame_rate_num > 0 &&
+            videomaster_context->video_frame_rate_den > 0)
+        {
+            LONGLONG half_frame_us =
+                (LONGLONG)videomaster_context->video_frame_rate_den * 500000 /
+                videomaster_context->video_frame_rate_num;
+            if (half_frame_us > sync_tolerance_us)
+                sync_tolerance_us = half_frame_us;
+        }
+
+        /* Max resync attempts: twice the default buffer queue depth (8).
+         * This covers startup drift and occasional hardware slot drops. */
+        int max_resync_attempts = 16;
+        int resyncs_this_call = 0;
+
+        /* Lock video slot with retry on transient errors.
+         * The SDK can return non-timeout errors (e.g. VHDERR_BADINPUTSIGNAL)
+         * during brief signal glitches. Retry a few times before giving up. */
+        {
+            int video_retries = 3;
+            VHD_ERRORCODE vhd_result;
+            do {
+                vhd_result = VHD_LockSlotHandle(
+                    videomaster_context->stream_handle,
+                    &videomaster_context->slot_handle);
+                if (vhd_result == VHDERR_NOERROR)
+                {
+                    lock_video = 0;
+                    break;
+                }
+                if (vhd_result == VHDERR_TIMEOUT)
+                {
+                    av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                           "Timeout waiting for disjoined video slot\n");
+                    return AVERROR(EAGAIN);
+                }
+                video_retries--;
+                if (video_retries > 0)
+                {
+                    av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                           "Disjoined video slot lock failed (VHDERR=%d %s), "
+                           "retrying (%d attempts left)\n",
+                           vhd_result,
+                           VHD_ERRORCODE_ToPrettyString(vhd_result),
+                           video_retries);
+                    av_usleep(1000);
+                }
+                else
+                    av_log(videomaster_context->avctx, AV_LOG_ERROR,
+                           "Failed to lock disjoined video slot "
+                           "(VHDERR=%d %s) after all retries\n",
+                           vhd_result,
+                           VHD_ERRORCODE_ToPrettyString(vhd_result));
+                lock_video = AVERROR(EIO);
+            } while (video_retries > 0);
+            if (lock_video != 0)
+                return AVERROR(EIO);
+        }
+
+        /* Lock ANC slot with retry on transient errors */
+        {
+            int anc_retries = 3;
+            VHD_ERRORCODE vhd_result;
+            do {
+                vhd_result = VHD_LockSlotHandle(
+                    videomaster_context->anc_stream_handle,
+                    &videomaster_context->anc_slot_handle);
+                if (vhd_result == VHDERR_NOERROR)
+                {
+                    lock_anc = 0;
+                    break;
+                }
+                if (vhd_result == VHDERR_TIMEOUT)
+                {
+                    lock_anc = AVERROR(EAGAIN);
+                    break;
+                }
+                anc_retries--;
+                if (anc_retries > 0)
+                {
+                    av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                           "Disjoined ANC slot lock failed (VHDERR=%d %s), "
+                           "retrying (%d attempts left)\n",
+                           vhd_result,
+                           VHD_ERRORCODE_ToPrettyString(vhd_result),
+                           anc_retries);
+                    av_usleep(1000);
+                }
+                else
+                    av_log(videomaster_context->avctx, AV_LOG_ERROR,
+                           "Failed to lock disjoined ANC slot "
+                           "(VHDERR=%d %s) after all retries\n",
+                           vhd_result,
+                           VHD_ERRORCODE_ToPrettyString(vhd_result));
+                lock_anc = AVERROR(EIO);
+            } while (anc_retries > 0);
+            if (lock_anc != 0)
+            {
+                VHD_UnlockSlotHandle(videomaster_context->slot_handle);
+                videomaster_context->slot_handle = NULL;
+                return (lock_anc == AVERROR(EAGAIN)) ? AVERROR(EAGAIN) : AVERROR(EIO);
+            }
+        }
+
+        /* Compare system timestamps to ensure video and ANC are in phase */
+        VHD_GetSlotSystemTime(videomaster_context->slot_handle, &ts_video);
+        VHD_GetSlotSystemTime(videomaster_context->anc_slot_handle, &ts_anc);
+        ts_diff = ts_video - ts_anc;
+        if (ts_diff < 0) ts_diff = -ts_diff;
+
+        av_log(videomaster_context->avctx, AV_LOG_DEBUG,
+               "Disjoined timestamps: video=%lld anc=%lld diff=%lld us "
+               "(tolerance=%lld us)\n",
+               (long long)ts_video, (long long)ts_anc,
+               (long long)(ts_video - ts_anc),
+               (long long)sync_tolerance_us);
+
+        /* Re-sync loop: if timestamps differ by more than the tolerance,
+         * drop the older slot and re-lock to catch up with the newer one */
+        while (ts_diff > sync_tolerance_us && max_resync_attempts > 0)
+        {
+            max_resync_attempts--;
+            resyncs_this_call++;
+            if (ts_video < ts_anc)
+            {
+                /* Video is older — drop it and get next */
+                av_log(videomaster_context->avctx, AV_LOG_DEBUG,
+                       "Disjoined resync: video slot older, dropping "
+                       "(diff=%lld us)\n", (long long)(ts_anc - ts_video));
+                VHD_UnlockSlotHandle(videomaster_context->slot_handle);
+                videomaster_context->slot_handle = NULL;
+                lock_video = handle_vhd_status(
+                    videomaster_context->avctx,
+                    VHD_LockSlotHandle(videomaster_context->stream_handle,
+                                       &videomaster_context->slot_handle),
+                    "Disjoined video slot re-locked",
+                    "Failed to re-lock disjoined video slot");
+                if (lock_video != 0)
+                {
+                    VHD_UnlockSlotHandle(videomaster_context->anc_slot_handle);
+                    videomaster_context->anc_slot_handle = NULL;
+                    return (lock_video == AVERROR(EAGAIN))
+                               ? AVERROR(EAGAIN) : AVERROR(EIO);
+                }
+                VHD_GetSlotSystemTime(videomaster_context->slot_handle,
+                                      &ts_video);
+            }
+            else
+            {
+                /* ANC is older — drop it and get next */
+                av_log(videomaster_context->avctx, AV_LOG_DEBUG,
+                       "Disjoined resync: ANC slot older, dropping "
+                       "(diff=%lld us)\n", (long long)(ts_video - ts_anc));
+                VHD_UnlockSlotHandle(videomaster_context->anc_slot_handle);
+                videomaster_context->anc_slot_handle = NULL;
+                lock_anc = handle_vhd_status(
+                    videomaster_context->avctx,
+                    VHD_LockSlotHandle(videomaster_context->anc_stream_handle,
+                                       &videomaster_context->anc_slot_handle),
+                    "Disjoined ANC slot re-locked",
+                    "Failed to re-lock disjoined ANC slot");
+                if (lock_anc != 0)
+                {
+                    VHD_UnlockSlotHandle(videomaster_context->slot_handle);
+                    videomaster_context->slot_handle = NULL;
+                    return (lock_anc == AVERROR(EAGAIN))
+                               ? AVERROR(EAGAIN) : AVERROR(EIO);
+                }
+                VHD_GetSlotSystemTime(videomaster_context->anc_slot_handle,
+                                      &ts_anc);
+            }
+            ts_diff = ts_video - ts_anc;
+            if (ts_diff < 0) ts_diff = -ts_diff;
+        }
+
+        /* Track cumulative resyncs for drift monitoring */
+        videomaster_context->disjoined_resync_total += resyncs_this_call;
+        videomaster_context->disjoined_resync_log_counter++;
+
+        if (ts_diff > sync_tolerance_us)
+            av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                   "Disjoined streams: could not sync after %d attempts "
+                   "(video=%lld anc=%lld diff=%lld us, tolerance=%lld us)\n",
+                   resyncs_this_call,
+                   (long long)ts_video, (long long)ts_anc,
+                   (long long)(ts_video - ts_anc),
+                   (long long)sync_tolerance_us);
+        else if (resyncs_this_call > 0)
+            av_log(videomaster_context->avctx, AV_LOG_DEBUG,
+                   "Disjoined streams: synced after %d resync(s) "
+                   "(diff=%lld us)\n",
+                   resyncs_this_call, (long long)(ts_video - ts_anc));
+
+        /* Periodic drift warning: every 500 frames, report if resyncs
+         * are happening frequently (> 5% of frames needed resync) */
+        if (videomaster_context->disjoined_resync_log_counter >= 500)
+        {
+            if (videomaster_context->disjoined_resync_total > 25)
+                av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                       "Disjoined drift monitor: %u resyncs in last 500 "
+                       "frames (%.1f%%)\n",
+                       videomaster_context->disjoined_resync_total,
+                       videomaster_context->disjoined_resync_total * 100.0 / 500);
+            videomaster_context->disjoined_resync_total = 0;
+            videomaster_context->disjoined_resync_log_counter = 0;
+        }
+
+        /* Get video from video slot */
+        if (videomaster_context->has_video &&
+            get_video_buffer(videomaster_context) != 0)
+        {
+            /* Unlock both slots on failure */
+            VHD_UnlockSlotHandle(videomaster_context->slot_handle);
+            videomaster_context->slot_handle = NULL;
+            VHD_UnlockSlotHandle(videomaster_context->anc_slot_handle);
+            videomaster_context->anc_slot_handle = NULL;
+            return AVERROR(EIO);
+        }
+
+        /* Get audio from ANC slot (audio is embedded in ANC data) */
+        if (videomaster_context->has_audio)
+        {
+            VHD_AUDIOINFO *audio_info =
+                &videomaster_context->audio_info.sdi.audio_info;
+            handle_vhd_status(
+                videomaster_context->avctx,
+                VHD_SlotExtractAudio(videomaster_context->anc_slot_handle,
+                                     audio_info),
+                "Audio extracted from disjoined ANC slot",
+                "Failed to extract audio from disjoined ANC slot");
+            interleaved_audio_info_to_audio_buffer(
+                videomaster_context, audio_info,
+                &videomaster_context->audio_buffer,
+                &videomaster_context->audio_buffer_size);
+        }
+
+        /* Extract timestamp while slot is still locked — the slot handle
+         * will be released below before returning to the caller. */
+        ff_videomaster_get_timestamp(videomaster_context,
+                                     &videomaster_context->pts);
+
+        /* Copy video data from slot buffer into our own allocation, then
+         * unlock both slots immediately. Disjoined streams become invalid
+         * if slots are held locked for too long (e.g. during encoder init).
+         * The audio was already copied by interleaved_audio_info_to_audio_buffer. */
+        if (videomaster_context->has_video &&
+            videomaster_context->video_buffer &&
+            videomaster_context->video_buffer_size > 0)
+        {
+            uint8_t *slot_video_ptr = videomaster_context->video_buffer;
+            uint32_t slot_video_size = videomaster_context->video_buffer_size;
+
+            /* Reuse existing disjoined video copy buffer if large enough */
+            if (!videomaster_context->disjoined_video_copy ||
+                videomaster_context->disjoined_video_copy_size < slot_video_size)
+            {
+                av_freep(&videomaster_context->disjoined_video_copy);
+                videomaster_context->disjoined_video_copy =
+                    av_malloc(slot_video_size);
+                if (!videomaster_context->disjoined_video_copy)
+                {
+                    VHD_UnlockSlotHandle(videomaster_context->slot_handle);
+                    videomaster_context->slot_handle = NULL;
+                    VHD_UnlockSlotHandle(videomaster_context->anc_slot_handle);
+                    videomaster_context->anc_slot_handle = NULL;
+                    return AVERROR(ENOMEM);
+                }
+                videomaster_context->disjoined_video_copy_size = slot_video_size;
+            }
+            memcpy(videomaster_context->disjoined_video_copy,
+                   slot_video_ptr, slot_video_size);
+            videomaster_context->video_buffer =
+                videomaster_context->disjoined_video_copy;
+        }
+
+        /* Unlock both slots now — data has been copied */
+        VHD_UnlockSlotHandle(videomaster_context->slot_handle);
+        videomaster_context->slot_handle = NULL;
+        VHD_UnlockSlotHandle(videomaster_context->anc_slot_handle);
+        videomaster_context->anc_slot_handle = NULL;
+
+        av_log(videomaster_context->avctx, AV_LOG_TRACE,
+               "ff_videomaster_get_data: OUT (disjoined)\n");
+        return 0;
     }
-    else if (lock_slot_status != 0)
-        return AVERROR(EIO);
 
-    if (videomaster_context->has_video &&
-        get_video_buffer(videomaster_context) != 0)
-        return AVERROR(EIO);
+    /* ── Joined stream mode (original path) ── */
+    {
+        int lock_slot_status = lock_slot(videomaster_context);
 
-    if (videomaster_context->has_audio &&
-        get_audio_buffer(videomaster_context) != 0)
-        return AVERROR(EIO);
+        if (lock_slot_status == AVERROR(EAGAIN))
+        {
+            av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                   "Timeout while waiting for "
+                   "slot lock\n");
+            return AVERROR(EAGAIN);
+        }
+        else if (lock_slot_status != 0)
+            return AVERROR(EIO);
+
+        if (videomaster_context->has_video &&
+            get_video_buffer(videomaster_context) != 0)
+            return AVERROR(EIO);
+
+        if (videomaster_context->has_audio &&
+            get_audio_buffer(videomaster_context) != 0)
+            return AVERROR(EIO);
+    }
 
     av_log(videomaster_context->avctx, AV_LOG_TRACE,
            "ff_videomaster_get_data: OUT\n");
@@ -2183,7 +2510,16 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
     static uint64_t system_ts_base = 0;
     VHD_TIMECODE    time_code;
     float           total_frames = 0;
-    if (videomaster_context->slot_handle == NULL)
+
+    /* In disjoined mode, LTC timecodes are carried in the ANC stream,
+     * not the video stream. Use the ANC slot handle for all slot-level
+     * timestamp/timecode queries when available. */
+    HANDLE ts_slot = videomaster_context->slot_handle;
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->anc_slot_handle)
+        ts_slot = videomaster_context->anc_slot_handle;
+
+    if (ts_slot == NULL)
     {
         av_log(videomaster_context->avctx, AV_LOG_ERROR,
                "Slot handle is NULL, cannot "
@@ -2197,7 +2533,7 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
         GET_AND_CHECK(
             handle_vhd_status, videomaster_context->avctx,
             videomaster_context->avctx,
-            VHD_GetSlotHardwareTimestamp(videomaster_context->slot_handle,
+            VHD_GetSlotHardwareTimestamp(ts_slot,
                                          timestamp, &clock_frequency),
             "Hardware Timestamp retrieved "
             "successfully",
@@ -2216,7 +2552,7 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
             handle_vhd_status, videomaster_context->avctx,
             videomaster_context->avctx,
             VHD_GetSlotTimecode(
-                videomaster_context->slot_handle,
+                ts_slot,
                 (VHD_TIMECODE_SOURCE)
                     get_videomaster_enumeration_value_for_timestamp_source(
                         videomaster_context->timestamp_source),
@@ -2249,7 +2585,7 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
 
         GET_AND_CHECK(handle_vhd_status, videomaster_context->avctx,
                       videomaster_context->avctx,
-                      VHD_GetSlotSystemTime(videomaster_context->slot_handle,
+                      VHD_GetSlotSystemTime(ts_slot,
                                             timestamp),
                       "Timestamp retrieved "
                       "successfully",
@@ -2275,7 +2611,7 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
         int got_slot_tc = 0;
         for (i = 0; i < 2 && !got_slot_tc; i++)
         {
-            if (VHD_GetSlotTimecode(videomaster_context->slot_handle,
+            if (VHD_GetSlotTimecode(ts_slot,
                                     tc_sources[i], &slot_tc) == VHDERR_NOERROR)
             {
                 videomaster_context->last_tc_h = slot_tc.Hour;
@@ -2319,7 +2655,7 @@ int ff_videomaster_get_video_stream_properties(
     *channel_type = ff_videomaster_get_channel_type_from_index(avctx,
                                                                board_handle,
                                                                channel_index);
-    av_log(avctx, AV_LOG_TRACE,
+    av_log(avctx, AV_LOG_INFO,
            "ff_videomaster_get_video_stream_"
            "properties: IN\n");
 
@@ -2468,6 +2804,8 @@ int ff_videomaster_get_video_stream_properties(
         }
     }
 
+	av_log(avctx, AV_LOG_INFO, interlaced ? "interlaced\n" : "progressive\n");
+
     av_log(avctx, AV_LOG_TRACE,
            "ff_videomaster_get_video_stream_"
            "properties: OUT\n");
@@ -2580,6 +2918,47 @@ int ff_videomaster_open_stream_handle(VideoMasterContext *videomaster_context)
 
     if (videomaster_context->channel_type != AV_VIDEOMASTER_CHANNEL_HDMI)
         stream_proc = VHD_SDI_STPROC_JOINED;
+
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->channel_type != AV_VIDEOMASTER_CHANNEL_HDMI)
+    {
+        int ret;
+        VHD_STREAMTYPE rx_type = get_rx_stream_type_from_index(
+            videomaster_context->channel_index);
+
+        /* Open disjoined video stream */
+        ret = handle_vhd_status(
+            videomaster_context->avctx,
+            VHD_OpenStreamHandle(videomaster_context->board_handle,
+                                 rx_type, VHD_SDI_STPROC_DISJOINED_VIDEO,
+                                 NULL,
+                                 &videomaster_context->stream_handle, NULL),
+            "Disjoined video stream handle opened successfully",
+            "Failed to open disjoined video stream handle");
+        if (ret != 0)
+            return ret;
+
+        /* Open disjoined ANC stream */
+        ret = handle_vhd_status(
+            videomaster_context->avctx,
+            VHD_OpenStreamHandle(videomaster_context->board_handle,
+                                 rx_type, VHD_SDI_STPROC_DISJOINED_ANC,
+                                 NULL,
+                                 &videomaster_context->anc_stream_handle, NULL),
+            "Disjoined ANC stream handle opened successfully",
+            "Failed to open disjoined ANC stream handle");
+        if (ret != 0)
+        {
+            VHD_CloseStreamHandle(videomaster_context->stream_handle);
+            videomaster_context->stream_handle = NULL;
+            return ret;
+        }
+
+        av_log(videomaster_context->avctx, AV_LOG_INFO,
+               "Disjoined streams mode: video and ANC streams opened separately\n");
+        return 0;
+    }
+
     // Open stream as JOINED to get audio and
     // video data
     return handle_vhd_status(
@@ -2607,6 +2986,18 @@ int ff_videomaster_release_data(VideoMasterContext *videomaster_context)
         videomaster_context->audio_buffer = NULL;
     }
     videomaster_context->audio_buffer_size = 0;
+
+    /* Unlock ANC slot in disjoined mode */
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->anc_slot_handle)
+    {
+        handle_vhd_status(videomaster_context->avctx,
+                          VHD_UnlockSlotHandle(
+                              videomaster_context->anc_slot_handle),
+                          "Disjoined ANC slot unlocked",
+                          "Failed to unlock disjoined ANC slot");
+        videomaster_context->anc_slot_handle = NULL;
+    }
 
     av_log(videomaster_context->avctx, AV_LOG_TRACE,
            "ff_videomaster_release_data: OUT\n");
@@ -2720,13 +3111,21 @@ int ff_videomaster_start_stream(VideoMasterContext *videomaster_context)
                 videomaster_context->stream_handle, VHD_SDI_SP_VIDEO_STANDARD,
                 videomaster_context->video_info.sdi.video_standard),
             "", "");
-        handle_vhd_status(
-            videomaster_context->avctx,
-            VHD_SetStreamProperty(
-                videomaster_context->stream_handle,
-                VHD_SDI_BP_GENLOCK_CLOCK_DIV,
-                videomaster_context->video_info.sdi.clock_divisor),
-            "", "");
+        /* Note: VHD_SDI_BP_GENLOCK_CLOCK_DIV is a BOARD property (not a stream
+         * property). Its enum value collides with VHD_SDI_SP_TX_GENLOCK_SELECTION
+         * so passing it to VHD_SetStreamProperty would accidentally set the TX
+         * genlock selection, which corrupts DISJOINED_VIDEO streams. The clock
+         * divisor is auto-detected from the RX channel and does not need to be
+         * set on the stream.
+            handle_vhd_status(
+                videomaster_context->avctx,
+                VHD_SetStreamProperty(
+                    videomaster_context->stream_handle,
+                    VHD_SDI_BP_GENLOCK_CLOCK_DIV,
+                    videomaster_context->video_info.sdi.clock_divisor),
+                "", ""
+            );
+        */
         handle_vhd_status(videomaster_context->avctx,
                           VHD_SetStreamProperty(
                               videomaster_context->stream_handle,
@@ -2739,26 +3138,40 @@ int ff_videomaster_start_stream(VideoMasterContext *videomaster_context)
                             &videomaster_context->audio_info.sdi.audio_info);
     }
 
-    if (videomaster_context->video_interlaced)
-    {
+    if (videomaster_context->video_interlaced) {
         handle_vhd_status(
             videomaster_context->avctx,
             VHD_GetBoardCapability(videomaster_context->board_handle,
                                    VHD_CORE_BOARD_CAP_FIELD_MERGING,
                                    &has_field_merge_capability),
             "", "");
-        if (has_field_merge_capability)
+        if (has_field_merge_capability) {
             handle_vhd_status(
                 videomaster_context->avctx,
                 VHD_SetStreamProperty(videomaster_context->stream_handle,
                                       VHD_CORE_SP_FIELD_MERGE, true),
                 "", "Unable to set field merge property for interlaced stream");
-        else
+            av_log(videomaster_context->avctx, AV_LOG_INFO,
+                   "ENABLE FIELD MERGING.\n");
+        } else {
             av_log(videomaster_context->avctx, AV_LOG_WARNING,
                    "Field merge not supported on "
                    "this board, interlaced "
                    "content might be affected\n");
+        }
     }
+
+    /* Increase buffer queue depth from the default (4) to absorb the
+     * encoder initialization delay without dropping frames. At 25fps
+     * a depth of 32 provides ~1280ms of buffer. */
+    handle_vhd_status(videomaster_context->avctx,
+                      VHD_SetStreamProperty(videomaster_context->stream_handle,
+                                            VHD_CORE_SP_BUFFERQUEUE_DEPTH, 32),
+                      "", "");
+    handle_vhd_status(videomaster_context->avctx,
+                      VHD_SetStreamProperty(videomaster_context->stream_handle,
+                                            VHD_CORE_SP_BUFFERQUEUE_PRELOAD, 0),
+                      "", "");
 
     handle_vhd_status(videomaster_context->avctx,
                       VHD_SetStreamProperty(videomaster_context->stream_handle,
@@ -2869,20 +3282,68 @@ int ff_videomaster_start_stream(VideoMasterContext *videomaster_context)
                   VHD_StartStream(videomaster_context->stream_handle),
                   "Stream started successfully", "Failed to start stream");
 
+    /* Start the disjoined ANC stream if in disjoined mode */
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->anc_stream_handle)
+    {
+        /* Configure ANC stream with same SDI properties */
+        if (videomaster_context->channel_type != AV_VIDEOMASTER_CHANNEL_HDMI)
+        {
+            VHD_SetStreamProperty(
+                videomaster_context->anc_stream_handle,
+                VHD_SDI_SP_VIDEO_STANDARD,
+                videomaster_context->video_info.sdi.video_standard);
+            /* Skip VHD_SDI_BP_GENLOCK_CLOCK_DIV: board property, enum
+             * collides with VHD_SDI_SP_TX_GENLOCK_SELECTION */
+            VHD_SetStreamProperty(
+                videomaster_context->anc_stream_handle,
+                VHD_SDI_SP_INTERFACE,
+                videomaster_context->video_info.sdi.interface);
+            /* audio_info is already initialized in the SDI path above */
+        }
+
+        VHD_SetStreamProperty(videomaster_context->anc_stream_handle,
+                              VHD_CORE_SP_TRANSFER_SCHEME,
+                              VHD_TRANSFER_SLAVED);
+        VHD_SetStreamProperty(videomaster_context->anc_stream_handle,
+                              VHD_CORE_SP_IO_TIMEOUT, 10000);
+
+        GET_AND_CHECK(handle_vhd_status, videomaster_context->avctx,
+                      videomaster_context->avctx,
+                      VHD_StartStream(videomaster_context->anc_stream_handle),
+                      "Disjoined ANC stream started successfully",
+                      "Failed to start disjoined ANC stream");
+        av_log(videomaster_context->avctx, AV_LOG_INFO,
+               "Disjoined mode: both video and ANC streams started\n");
+    }
+
     av_log(videomaster_context->avctx, AV_LOG_TRACE,
-           "ff_videomaster_start_stream: IN\n");
+           "ff_videomaster_start_stream: OUT\n");
     return 0;
 }
 
 int ff_videomaster_stop_stream(VideoMasterContext *videomaster_context)
 {
+    int ret;
 
     release_audio_info(videomaster_context,
                        &videomaster_context->audio_info.sdi.audio_info);
-    return handle_vhd_status(videomaster_context->avctx,
-                             VHD_StopStream(videomaster_context->stream_handle),
-                             "Stream stopped successfully",
-                             "Failed to stop stream");
+
+    /* Stop disjoined ANC stream first */
+    if (videomaster_context->disjoined_streams &&
+        videomaster_context->anc_stream_handle)
+    {
+        handle_vhd_status(videomaster_context->avctx,
+                          VHD_StopStream(videomaster_context->anc_stream_handle),
+                          "Disjoined ANC stream stopped successfully",
+                          "Failed to stop disjoined ANC stream");
+    }
+
+    ret = handle_vhd_status(videomaster_context->avctx,
+                            VHD_StopStream(videomaster_context->stream_handle),
+                            "Stream stopped successfully",
+                            "Failed to stop stream");
+    return ret;
 }
 
 const char *ff_videomaster_timestamp_type_to_string(
