@@ -445,9 +445,6 @@ static int mov_read_udta_string(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     case MKTAG(0xa9,'w','r','n'): key = "warning";   break;
     case MKTAG(0xa9,'w','r','t'): key = "composer";  break;
     case MKTAG(0xa9,'x','y','z'): key = "location";  break;
-    /* Custom deltacast/videomaster LTC metadata (track-level udta). */
-    case MKTAG(0xa9,'t','c','r'): key = "timecode_rate";    break;
-    case MKTAG(0xa9,'t','c','l'): key = "timecode_locked";  break;
     }
 retry:
     if (c->itunes_metadata && atom.size > 8) {
@@ -575,15 +572,7 @@ retry:
             str[str_size] = 0;
         }
         c->fc->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
-        /* Track-level round-trip for custom deltacast timecode keys. */
-        if (c->trak_index >= 0 &&
-            (!strcmp(key, "timecode_rate") ||
-             !strcmp(key, "timecode_locked"))) {
-            av_dict_set(&c->fc->streams[c->trak_index]->metadata,
-                        key, str, 0);
-        } else {
-            av_dict_set(&c->fc->metadata, key, str, 0);
-        }
+        av_dict_set(&c->fc->metadata, key, str, 0);
         if (*language && strcmp(language, "und")) {
             snprintf(key2, sizeof(key2), "%s-%s", key, language);
             av_dict_set(&c->fc->metadata, key2, str, 0);

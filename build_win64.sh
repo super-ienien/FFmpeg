@@ -21,8 +21,8 @@ set -e
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 # VideoMaster SDK paths — adjust these to your SDK installation
-VM_INCLUDE="${VM_INCLUDE:-../../sdk/VideoMaster/resources/include}"
-VM_LIB_ORIG="${VM_LIB:-../../sdk/VideoMaster/resources/lib}"
+VM_INCLUDE="${VM_INCLUDE:-../../sdk/VideoMaster/windows/x64/resources/include}"
+VM_LIB_ORIG="${VM_LIB:-../../sdk/VideoMaster/windows/x64/resources/lib}"
 
 # DeckLink SDK path
 DL_INCLUDE="${DL_INCLUDE:-../../sdk/Decklink/Blackmagic_DeckLink_SDK_14.2/Win/include}"

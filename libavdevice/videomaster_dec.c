@@ -155,31 +155,17 @@ static void attach_timecode_to_packet(AVFormatContext *avctx,
         }
     }
 
-    /* String metadata */
-    tcstr_ptr = av_timecode_make_string(&avtc, tcstr, 0);
-    if (tcstr_ptr)
-    {
-        AVDictionary *meta = NULL;
-        if (av_dict_set(&meta, "timecode", tcstr_ptr, 0) >= 0) {
-            size_t meta_len;
-            uint8_t *packed = av_packet_pack_dictionary(meta, &meta_len);
-            av_dict_free(&meta);
-            if (packed) {
-                if (av_packet_add_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA,
-                                            packed, meta_len) < 0)
-                    av_freep(&packed);
-            }
-        }
-    }
-
-    /* Set stream metadata on first frame so muxer can create tmcd track */
-    if (!ctx->initial_tc_set && ctx->video_stream && tcstr_ptr)
+    /* Encode LTC framerate as a rational num/den so it round-trips through
+     * the MP4 container (via \251tcr atom in track udta). Common LTC rates
+     * are either integer (24, 25, 30) or /1001 fractions (23.976, 29.97).
+     * Computed once so the value is attached both to each packet's
+     * STRINGS_METADATA side data (which survives transcoding) and to the
+     * input stream metadata. */
     {
         char rate_str[16];
         int rate_num, rate_den;
-        /* Encode LTC framerate as a rational num/den so it round-trips through
-         * the MP4 container (via \251tcr atom in track udta). Common LTC rates
-         * are either integer (24, 25, 30) or /1001 fractions (23.976, 29.97). */
+        const char *locked_str = ctx->last_tc_locked ? "1" : "0";
+
         if (fabsf(ctx->last_tc_fps - roundf(ctx->last_tc_fps)) < 0.01f) {
             rate_num = (int)roundf(ctx->last_tc_fps);
             rate_den = 1;
@@ -187,18 +173,42 @@ static void attach_timecode_to_packet(AVFormatContext *avctx,
             rate_num = (int)roundf(ctx->last_tc_fps * 1001.0f);
             rate_den = 1001;
         }
-        av_dict_set(&ctx->video_stream->metadata, "timecode", tcstr_ptr, 0);
         snprintf(rate_str, sizeof(rate_str), "%d/%d", rate_num, rate_den);
-        av_dict_set(&ctx->video_stream->metadata, "timecode_rate", rate_str, 0);
-        av_dict_set(&ctx->video_stream->metadata, "timecode_locked",
-                    ctx->last_tc_locked ? "1" : "0", 0);
-        ctx->initial_tc_set = true;
-        av_log(avctx, AV_LOG_INFO,
-               "Initial timecode: %s (locked: %s, rate: %s, fps: %.3f)\n",
-               tcstr_ptr,
-               ctx->last_tc_locked ? "yes" : "no",
-               rate_str,
-               ctx->last_tc_fps);
+
+        /* String metadata attached to the packet. The mov muxer merges this
+         * into the output stream metadata, so it survives re-encoding. */
+        tcstr_ptr = av_timecode_make_string(&avtc, tcstr, 0);
+        if (tcstr_ptr)
+        {
+            AVDictionary *meta = NULL;
+            if (av_dict_set(&meta, "timecode", tcstr_ptr, 0) >= 0 &&
+                av_dict_set(&meta, "timecode_rate", rate_str, 0) >= 0 &&
+                av_dict_set(&meta, "timecode_locked", locked_str, 0) >= 0)
+            {
+                size_t meta_len;
+                uint8_t *packed = av_packet_pack_dictionary(meta, &meta_len);
+                av_dict_free(&meta);
+                if (packed) {
+                    if (av_packet_add_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA,
+                                                packed, meta_len) < 0)
+                        av_freep(&packed);
+                }
+            } else {
+                av_dict_free(&meta);
+            }
+        }
+
+        /* Also set on stream metadata for the no-transcode path. */
+        if (!ctx->initial_tc_set && ctx->video_stream && tcstr_ptr)
+        {
+            av_dict_set(&ctx->video_stream->metadata, "timecode", tcstr_ptr, 0);
+            av_dict_set(&ctx->video_stream->metadata, "timecode_rate", rate_str, 0);
+            av_dict_set(&ctx->video_stream->metadata, "timecode_locked", locked_str, 0);
+            ctx->initial_tc_set = true;
+            av_log(avctx, AV_LOG_INFO,
+                   "Initial timecode: %s (locked: %s, rate: %s, fps: %.3f)\n",
+                   tcstr_ptr, locked_str, rate_str, ctx->last_tc_fps);
+        }
     }
 
     av_log(avctx, AV_LOG_TRACE, "Timecode: %02d:%02d:%02d:%02d (locked: %s, fps: %.3f)\n",

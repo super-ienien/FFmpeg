@@ -2899,6 +2899,24 @@ static int mov_write_source_reference_tag(AVIOContext *pb, MOVTrack *track, cons
     return update_size(pb,pos);
 }
 
+/**
+ * Return the rate at which the tmcd track's timecode is expressed. Defaults to
+ * the source stream's avg_frame_rate, but can be overridden by the stream-level
+ * "timecode_rate" metadata (format "num/den", e.g. "25/1" or "30000/1001").
+ * This lets LTC timecode be stored at its native rate even when the companion
+ * video is captured at a different frame rate (e.g. LTC 25fps with 1080p50).
+ */
+static AVRational mov_tmcd_rate(AVStream *src_st)
+{
+    AVDictionaryEntry *t = av_dict_get(src_st->metadata, "timecode_rate", NULL, 0);
+    if (t) {
+        int num = 0, den = 0;
+        if (sscanf(t->value, "%d/%d", &num, &den) == 2 && num > 0 && den > 0)
+            return (AVRational){num, den};
+    }
+    return src_st->avg_frame_rate;
+}
+
 static int mov_write_tmcd_tag(AVIOContext *pb, MOVTrack *track)
 {
     int64_t pos = avio_tell(pb);
@@ -2906,13 +2924,15 @@ static int mov_write_tmcd_tag(AVIOContext *pb, MOVTrack *track)
     int frame_duration;
     int nb_frames;
     AVDictionaryEntry *t = NULL;
+    /* Use LTC rate from timecode_rate metadata if set, else video rate. */
+    AVRational rate = mov_tmcd_rate(track->st);
 
-    if (!track->st->avg_frame_rate.num || !track->st->avg_frame_rate.den) {
+    if (!rate.num || !rate.den) {
         av_log(NULL, AV_LOG_ERROR, "avg_frame_rate not set for tmcd track.\n");
         return AVERROR(EINVAL);
     } else {
-        frame_duration = av_rescale(track->timescale, track->st->avg_frame_rate.den, track->st->avg_frame_rate.num);
-        nb_frames      = ROUNDED_DIV(track->st->avg_frame_rate.num, track->st->avg_frame_rate.den);
+        frame_duration = av_rescale(track->timescale, rate.den, rate.num);
+        nb_frames      = ROUNDED_DIV(rate.num, rate.den);
     }
 
     if (nb_frames > 255) {
@@ -4129,12 +4149,8 @@ static int mov_write_track_udta_tag(AVIOContext *pb, MOVMuxContext *mov,
     if (ret < 0)
         return ret;
 
-    if (mov->mode & (MODE_MP4|MODE_MOV)) {
+    if (mov->mode & (MODE_MP4|MODE_MOV))
         mov_write_track_metadata(pb_buf, st, "name", "title");
-        /* Custom deltacast/videomaster LTC timecode metadata. */
-        mov_write_track_metadata(pb_buf, st, "\251tcr", "timecode_rate");
-        mov_write_track_metadata(pb_buf, st, "\251tcl", "timecode_locked");
-    }
 
     if (mov->mode & MODE_MP4) {
         if ((ret = mov_write_track_kinds(pb_buf, st)) < 0)
@@ -7303,7 +7319,7 @@ static int mov_check_timecode_track(AVFormatContext *s, AVTimecode *tc, AVStream
     int ret;
 
     /* compute the frame number */
-    ret = av_timecode_init_from_string(tc, src_st->avg_frame_rate, tcstr, s);
+    ret = av_timecode_init_from_string(tc, mov_tmcd_rate(src_st), tcstr, s);
     return ret;
 }
 
@@ -7314,7 +7330,9 @@ static int mov_create_timecode_track(AVFormatContext *s, int index, int src_inde
     AVStream *src_st    = mov->tracks[src_index].st;
     uint8_t data[4];
     AVPacket *pkt = mov->pkt;
-    AVRational rate = src_st->avg_frame_rate;
+    /* Use LTC rate if provided via timecode_rate metadata, otherwise default
+     * to the source video's frame rate. */
+    AVRational rate = mov_tmcd_rate(src_st);
     int ret;
 
     /* tmcd track based on video stream */
@@ -7334,7 +7352,8 @@ static int mov_create_timecode_track(AVFormatContext *s, int index, int src_inde
         return AVERROR(ENOMEM);
     track->par->codec_type = AVMEDIA_TYPE_DATA;
     track->par->codec_tag  = track->tag;
-    track->st->avg_frame_rate = rate;
+    /* Note: intentionally NOT writing rate back onto src_st->avg_frame_rate —
+     * that would corrupt the video stream's frame rate when LTC != video. */
 
     /* the tmcd track just contains one packet with the frame number */
     pkt->data = data;
