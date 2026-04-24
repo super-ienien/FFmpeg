@@ -251,11 +251,6 @@ typedef struct VideoMasterContext
     uint32_t disjoined_resync_total;  ///< cumulative resync count (drift monitor)
     uint32_t disjoined_resync_log_counter; ///< frames since last drift warning
 
-    /* Diagnostic: log buffer queue filling for 5s after 'r'/'f' received.
-     * Set to av_gettime_relative() when the wait_for_input loop unblocks,
-     * reset to 0 once the 5s window has elapsed. */
-    int64_t diag_record_start_us;
-
     uint32_t board_index;    ///< index of the board to use
     uint32_t channel_index;  ///< index of the stream to use
     enum AVVideoMasterChannelType
@@ -323,6 +318,7 @@ typedef struct VideoMasterContext
     bool    last_tc_locked; ///< true if timecode source is locked
     float   last_tc_fps;    ///< timecode source frame rate
     bool    initial_tc_set; ///< true once initial timecode is set on stream metadata
+    bool    ltc_pts_anchored; ///< true once LTC has anchored the first PTS (LTC source only)
 
     uint8_t *video_buffer;       ///< buffer to store the video data
     uint32_t video_buffer_size;  ///< size of the video buffer

@@ -68,55 +68,6 @@ static int vm_read_key(void)
 }
 
 /**
- * @brief Diagnostic logger: while within the 5s window that follows the
- * reception of 'r'/'f' in the wait loop, dumps the current buffer queue
- * filling along with frame number, timecode and pts. Auto-disables once
- * the 5s window expires.
- *
- * @param ctx   VideoMaster context (must have diag_record_start_us set
- *              non-zero to actually log; otherwise this is a no-op).
- * @param phase Short tag identifying the call site ("trigger", "drain",
- *              "video", ...). Echoed in the log line.
- */
-static void log_buffer_queue_diag(VideoMasterContext *ctx, const char *phase)
-{
-    int64_t  now;
-    uint32_t video_filling = 0, anc_filling = 0;
-
-    if (ctx->diag_record_start_us == 0)
-        return;
-
-    now = av_gettime_relative();
-    if (now - ctx->diag_record_start_us > 5000000LL) {
-        av_log(ctx->avctx, AV_LOG_INFO,
-               "DIAG: 5s window elapsed, stop logging buffer queue\n");
-        ctx->diag_record_start_us = 0;
-        return;
-    }
-
-    if (ctx->stream_handle)
-        VHD_GetStreamProperty(ctx->stream_handle,
-                              VHD_CORE_SP_BUFFERQUEUE_FILLING,
-                              &video_filling);
-    if (ctx->disjoined_streams && ctx->anc_stream_handle)
-        VHD_GetStreamProperty(ctx->anc_stream_handle,
-                              VHD_CORE_SP_BUFFERQUEUE_FILLING,
-                              &anc_filling);
-
-    av_log(ctx->avctx, AV_LOG_INFO,
-           "DIAG[%-7s] t=+%4lldms frame=%-6u tc=%02d:%02d:%02d:%02d "
-           "pts=%-12lld video_q=%2u%s%u\n",
-           phase,
-           (long long)((now - ctx->diag_record_start_us) / 1000),
-           ctx->frames_received,
-           ctx->last_tc_h, ctx->last_tc_m, ctx->last_tc_s, ctx->last_tc_f,
-           (long long)ctx->pts,
-           (unsigned)video_filling,
-           ctx->disjoined_streams ? " anc_q=" : "",
-           (unsigned)anc_filling);
-}
-
-/**
  * @brief Attaches the timecode from ctx->last_tc_* (populated by
  * ff_videomaster_get_timestamp) to the video packet as S12M side data
  * and "timecode" string metadata.
@@ -916,6 +867,13 @@ int check_timestamp_source(VideoMasterContext *videomaster_context)
                 av_log(videomaster_context->avctx, AV_LOG_DEBUG,
                        "LTC source is locked at %.3f fps.\n",
                        ltc_source_frame_rate);
+                /* Always capture the LTC frame rate when locked — it is used
+                 * to convert H:M:S:F to microseconds for the first-PTS anchor
+                 * (videomaster_common.c LTC branch). Subsequent PTS are
+                 * derived from the video frame duration, so a mismatch between
+                 * LTC and video rates only affects the anchor conversion, not
+                 * downstream timing. The warning below is kept as info. */
+                videomaster_context->ltc_frame_rate = ltc_source_frame_rate;
                 if (videomaster_context->has_video)
                 {
                     float video_frame_rate =
@@ -925,15 +883,10 @@ int check_timestamp_source(VideoMasterContext *videomaster_context)
                     {
                         av_log(videomaster_context->avctx, AV_LOG_WARNING,
                                "LTC frame rate (%.3f fps) does not match "
-                               "video frame rate (%.3f fps). Timecode and pts "
-                               "deduced from it may be "
-                               "incorrect.\n",
+                               "video frame rate (%.3f fps). Anchor PTS is "
+                               "still computed from LTC; subsequent PTS "
+                               "follow the video frame duration.\n",
                                ltc_source_frame_rate, video_frame_rate);
-                    }
-                    else
-                    {
-                        videomaster_context->ltc_frame_rate =
-                            ltc_source_frame_rate;
                     }
                 }
             }
@@ -1513,10 +1466,6 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                 if (key == 'r' || key == 'f') {
                     av_log(avctx, AV_LOG_INFO, "WAIT FOR INPUT END.\n");
                     videomaster_context->wait_for_input = 0;
-                    /* Arm the buffer-queue diagnostic for the next 5 s */
-                    videomaster_context->diag_record_start_us =
-                        av_gettime_relative();
-                    log_buffer_queue_diag(videomaster_context, "trigger");
                 }
                 if (key == 'f') {
                     if (want_tc) {
@@ -1536,9 +1485,14 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     {
         videomaster_context->disjoined_first_after_wait = false;
         if (ff_videomaster_get_data(videomaster_context) == 0) {
-            log_buffer_queue_diag(videomaster_context, "drain");
             ff_videomaster_release_data(videomaster_context);
         }
+        /* Discard any LTC PTS that was anchored during the wait/drain phase
+         * (disjoined mode calls ff_videomaster_get_timestamp from inside
+         * ff_videomaster_get_data, so the anchor fired too early). Clearing
+         * this flag forces the next real capture frame to re-anchor from
+         * the LTC value at the actual recording start moment. */
+        videomaster_context->ltc_pts_anchored = false;
     }
 
     /* ── Generating black frames (no signal) ── */
@@ -1669,8 +1623,6 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                        videomaster_context->frames_received,
                        videomaster_context->frames_dropped);
             }
-
-            log_buffer_queue_diag(videomaster_context, "video");
         }
     }
     else

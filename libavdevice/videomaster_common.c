@@ -2638,37 +2638,61 @@ int ff_videomaster_get_timestamp(VideoMasterContext *videomaster_context,
              videomaster_context->timestamp_source ==
                  AV_VIDEOMASTER_TIMESTAMP_LTC_COMPANION_CARD)
     {
-        GET_AND_CHECK(
-            handle_vhd_status, videomaster_context->avctx,
-            videomaster_context->avctx,
-            VHD_GetSlotTimecode(
+        /* LTC as PTS source: anchor the first PTS from live LTC, then run
+         * free on frame-duration increments. Rationale: LTC can lose lock,
+         * wrap at 24h, or return 00:00:00:00 under SDK contention (4+
+         * parallel channels), which would otherwise reset PTS to 0 every
+         * frame and break the output muxer.
+         *
+         * last_tc_* (used by the tmcd stream and S12M side data) is still
+         * refreshed from live LTC by the generic block below, so tmcd
+         * output remains accurate frame-by-frame. */
+        if (!videomaster_context->ltc_pts_anchored)
+        {
+            VHD_ERRORCODE vhd_result = VHD_GetSlotTimecode(
                 ts_slot,
                 (VHD_TIMECODE_SOURCE)
                     get_videomaster_enumeration_value_for_timestamp_source(
                         videomaster_context->timestamp_source),
-                &time_code),
-            "LTC Timestamp retrieved "
-            "successfully",
-            "Failed to retrieve LTC "
-            "timestamp");
-        total_frames = ((time_code.Hour * 3600) + (time_code.Minute * 60) +
-                        time_code.Second) *
-                           videomaster_context->ltc_frame_rate +
-                       time_code.Frame;
-        *timestamp = (uint64_t)((total_frames * 1000000.0) /
-                                videomaster_context->ltc_frame_rate);
-
-        videomaster_context->last_tc_h = time_code.Hour;
-        videomaster_context->last_tc_m = time_code.Minute;
-        videomaster_context->last_tc_s = time_code.Second;
-        videomaster_context->last_tc_f = time_code.Frame;
-        videomaster_context->last_tc_flags = time_code.Flags;
-        videomaster_context->last_tc_valid = true;
-
-        av_log(videomaster_context->avctx, AV_LOG_DEBUG,
-               "Timecode: %02d:%02d:%02d:%02d - Computed timestamp: %lli\n",
-               time_code.Hour, time_code.Minute, time_code.Second,
-               time_code.Frame, *timestamp);
+                &time_code);
+            if (vhd_result != VHDERR_NOERROR ||
+                videomaster_context->ltc_frame_rate <= 0.0f)
+            {
+                av_log(videomaster_context->avctx, AV_LOG_WARNING,
+                       "LTC anchor failed (vhd=%d, ltc_fps=%.3f); "
+                       "starting PTS at 0\n",
+                       vhd_result, videomaster_context->ltc_frame_rate);
+                *timestamp = 0;
+            }
+            else
+            {
+                total_frames = ((time_code.Hour * 3600) +
+                                (time_code.Minute * 60) +
+                                time_code.Second) *
+                                   videomaster_context->ltc_frame_rate +
+                               time_code.Frame;
+                *timestamp = (uint64_t)((total_frames * 1000000.0) /
+                                        videomaster_context->ltc_frame_rate);
+                av_log(videomaster_context->avctx, AV_LOG_INFO,
+                       "LTC-anchored first PTS: %02d:%02d:%02d:%02d -> "
+                       "%lli us\n",
+                       time_code.Hour, time_code.Minute, time_code.Second,
+                       time_code.Frame, (long long)*timestamp);
+            }
+            videomaster_context->ltc_pts_anchored = true;
+        }
+        else
+        {
+            int64_t frame_dur_us = 0;
+            if (videomaster_context->video_frame_rate_num > 0 &&
+                videomaster_context->video_frame_rate_den > 0)
+            {
+                frame_dur_us =
+                    (int64_t)videomaster_context->video_frame_rate_den *
+                    1000000 / videomaster_context->video_frame_rate_num;
+            }
+            *timestamp = (uint64_t)(videomaster_context->pts + frame_dur_us);
+        }
     }
     else
     {
@@ -2844,6 +2868,89 @@ int ff_videomaster_get_video_stream_properties(
     }
     else
     {
+        /* ── Wait for the SDI video-standard autodetect to stabilize ──
+         *
+         * The Deltacast RX exposes TWO independent lock signals per
+         * channel:
+         *   (1) VHD_CORE_CP_STATUS::RXSTS_UNLOCKED — flips to "locked" as
+         *       soon as the SDI clock is detected on the cable. This is
+         *       what `ff_videomaster_is_channel_locked` checks upstream
+         *       in `check_channel_index`.
+         *   (2) VHD_SDI_CP_VIDEO_STANDARD — the autodetected video
+         *       standard (1080i50 vs 1080p50 vs 720p50…). This one takes
+         *       additional tens to hundreds of ms after (1) to settle on
+         *       the correct value.
+         *
+         * Without this wait, races were observed when four ffmpeg
+         * processes serially init their channels through the shared
+         * board-init mutex: channel 0 gets a stabilised standard
+         * (1080i50), but a 1080i50 physical signal was read as
+         * 1080p50 (progressive 50 fps) on channels 1/2 because the
+         * property query happened while autodetect was still in flight.
+         * Cascade consequences when that mis-detection goes through:
+         *   - `video_interlaced = false` → the FIELD_MERGE block in
+         *     `ff_videomaster_start_stream` is skipped entirely, so slots
+         *     are delivered per-field (50 Hz) instead of per-frame
+         *     (25 Hz) for the rest of the run.
+         *   - `video_frame_rate = 50` → LTC (25 fps) / video (50 fps)
+         *     mismatch warning, and the LTC PTS anchor in
+         *     `ff_videomaster_get_timestamp` is computed from the wrong
+         *     rate.
+         *   - Downstream filters and encoders run at the wrong frame
+         *     rate for the rest of the capture.
+         *
+         * Fix: poll VIDEO_STANDARD at 50 ms intervals and return as soon
+         * as two consecutive reads agree on the same value. On a
+         * correctly locked input this typically costs a single extra
+         * 50 ms poll; worst case is the 2 s timeout (chosen to cover the
+         * longest autodetect transients observed in the wild). If the
+         * timeout fires we log a warning and proceed with whatever value
+         * we have — that is no worse than the previous behaviour.
+         *
+         * The mutex (`ff_videomaster_acquire_board_init_lock`) serialises
+         * SDK calls between processes, but it cannot serialise the
+         * board's internal autodetect state machine. That is why a
+         * dedicated stabilization wait is required here. */
+        {
+            const int poll_interval_ms = 50;
+            const int timeout_ms       = 2000;
+            uint32_t prev_standard = 0xFFFFFFFF;
+            uint32_t cur_standard  = 0;
+            int attempts           = timeout_ms / poll_interval_ms;
+            int i;
+            int stabilized = 0;
+            for (i = 0; i < attempts; i++)
+            {
+                if (VHD_GetChannelProperty(board_handle, VHD_RX_CHANNEL,
+                                           channel_index,
+                                           VHD_SDI_CP_VIDEO_STANDARD,
+                                           &cur_standard) == VHDERR_NOERROR)
+                {
+                    if (i > 0 && cur_standard == prev_standard)
+                    {
+                        av_log(avctx, AV_LOG_DEBUG,
+                               "Video standard stabilized to %s after "
+                               "%d ms on channel %u\n",
+                               VHD_VIDEOSTANDARD_ToPrettyString(cur_standard),
+                               i * poll_interval_ms, channel_index);
+                        stabilized = 1;
+                        break;
+                    }
+                    prev_standard = cur_standard;
+                }
+                av_usleep(poll_interval_ms * 1000);
+            }
+            if (!stabilized)
+            {
+                av_log(avctx, AV_LOG_WARNING,
+                       "Video standard did not stabilize within %d ms on "
+                       "channel %u (last value: %s). Interlaced/progressive "
+                       "mis-detection is possible downstream.\n",
+                       timeout_ms, channel_index,
+                       VHD_VIDEOSTANDARD_ToPrettyString(cur_standard));
+            }
+        }
+
         handle_vhd_status(
             avctx,
             VHD_GetChannelProperty(board_handle, VHD_RX_CHANNEL, channel_index,
