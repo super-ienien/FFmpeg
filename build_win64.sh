@@ -61,6 +61,7 @@ pacman -S --needed --noconfirm \
     mingw-w64-x86_64-x264 \
     mingw-w64-x86_64-x265 \
     mingw-w64-x86_64-fdk-aac \
+    mingw-w64-x86_64-opus \
     mingw-w64-x86_64-aom \
     mingw-w64-x86_64-libvpx \
     mingw-w64-x86_64-ffnvcodec-headers \
@@ -176,6 +177,7 @@ fi
     --enable-libaom \
     --enable-libvpx \
     --enable-libfdk-aac \
+    --enable-libopus \
     --enable-libx264 \
     --enable-libx265 \
     --enable-nvenc \
@@ -251,4 +253,5 @@ echo "  - H.265 encoder:   libx265 + hevc_nvenc (NVIDIA)"
 echo "  - ProRes encoder:  prores, prores_aw, prores_ks (built-in)"
 echo "  - DNxHD encoder:   dnxhd (built-in)"
 echo "  - NVENC/NVDEC:     hardware acceleration (requires NVIDIA GPU + driver)"
+echo "  - Opus encoder:    libopus"
 echo "  - VideoMaster:     DELTACAST capture input device"

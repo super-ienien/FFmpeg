@@ -36,6 +36,7 @@ Requirements:
 | `signal_no_stop` | bool | 0 | Do not stop on signal loss. Generate black video + silent audio instead. Requires `default_video_mode` when starting without signal. |
 | `default_video_mode` | int | -1 | Default `VHD_VIDEOSTANDARD` index for no-signal startup. Use `-list_formats 1` to see the mode table. |
 | `disjoined_streams` | bool | 0 | Open separate disjoined video and ANC streams instead of a single joined stream. Slot timestamps are compared to ensure video and ANC buffers are temporally synchronized. SDI only. |
+| `audio_pipe` | string | none | Windows named pipe path (e.g. `\\.\pipe\liveedit_audio`). When set, raw interleaved PCM audio is continuously streamed to this pipe — independently of `wait_for_input` / `wait_for_tc` / signal loss. A second process consumes it with `-f s16le\|s24le -ar <rate> -ac <channels> -i <pipe>`. Single consumer, drops oldest bytes on consumer lag. Windows only. |
 
 ### Usage examples
 
@@ -63,6 +64,13 @@ ffmpeg -f videomaster -signal_no_stop 1 -default_video_mode 0 -i dummy -c:v libx
 
 # Capture with disjoined video/ANC streams (timestamp-synchronized)
 ffmpeg -f videomaster -disjoined_streams 1 -board_index 0 -channel_index 0 -i dummy -c:v libx264 output.mp4
+
+# Process 1 — waits for 'r' but always streams audio to the named pipe:
+ffmpeg -f videomaster -wait_for_input 1 -audio_pipe '\\.\pipe\liveedit_audio' \
+    -board_index 0 -channel_index 0 -i dummy -c:v libx264 output.mp4
+
+# Process 2 — consumes the IPC audio (24-bit SDI, 16 channels @ 48 kHz example):
+ffmpeg -f s24le -ar 48000 -ac 16 -i '\\.\pipe\liveedit_audio' -c:a copy audio.wav
 ```
 
 ## DeckLink Custom Options (`-f decklink`)

@@ -352,6 +352,10 @@ typedef struct VideoMasterContext
     uint8_t *silent_audio_buffer;   ///< pre-allocated silent audio frame
     uint32_t silent_audio_buffer_size; ///< size of the silent audio buffer
 
+    /* liveedit: raw-PCM IPC audio pipe (see videomaster_audio_pipe.h).
+     * Opaque pointer — NULL if audio_pipe option was not set. */
+    void *audio_pipe;
+
 } VideoMasterContext;
 
 /**
@@ -385,6 +389,7 @@ typedef struct VideoMasterData
     int64_t default_video_mode;    ///< default VHD_VIDEOSTANDARD index (-1=none)
     int64_t list_formats;          ///< list supported video formats and exit
     int64_t disjoined_streams;     ///< use disjoined video + ANC streams
+    char   *audio_pipe;            ///< named pipe path for raw-PCM IPC (Windows)
 } VideoMasterData;
 
 /**

@@ -16,6 +16,7 @@
 #include "libavutil/time.h"
 #include "libavutil/timecode.h"
 
+#include "videomaster_audio_pipe.h"
 #include "videomaster_common.h"
 
 #if defined(__APPLE__)
@@ -1199,6 +1200,14 @@ int ff_videomaster_read_close(AVFormatContext *avctx)
         return AVERROR(EINVAL);
     }
 
+    /* liveedit: close the audio IPC pipe early so the drain thread is
+     * joined before we free the context it references. */
+    if (videomaster_context->audio_pipe)
+    {
+        ff_videomaster_audio_pipe_close(videomaster_context->audio_pipe);
+        videomaster_context->audio_pipe = NULL;
+    }
+
     if (ff_videomaster_release_data(videomaster_context) != 0)
     {
         av_log(avctx, AV_LOG_ERROR, "Failed to release data\n");
@@ -1367,6 +1376,23 @@ int ff_videomaster_read_header(AVFormatContext *avctx)
     if (videomaster_context->wait_for_tc)
         av_log(avctx, AV_LOG_INFO, "WAIT FOR LOCKED LTC TIMECODE\n");
 
+    /* liveedit: open the audio IPC pipe now that audio properties are
+     * known. The pipe runs in its own thread and is decoupled from
+     * wait_for_input/wait_for_tc so a second process can consume audio
+     * from the very first captured frame. */
+    if (videomaster_data->audio_pipe && *videomaster_data->audio_pipe &&
+        videomaster_context->has_audio)
+    {
+        videomaster_context->audio_pipe = ff_videomaster_audio_pipe_create(
+            avctx, videomaster_data->audio_pipe,
+            videomaster_context->audio_sample_rate,
+            videomaster_context->audio_nb_channels,
+            videomaster_context->audio_sample_size);
+        if (!videomaster_context->audio_pipe)
+            av_log(avctx, AV_LOG_WARNING,
+                   "audio_pipe init failed — continuing without IPC audio\n");
+    }
+
     return 0;
 }
 
@@ -1408,6 +1434,18 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                     return AVERROR_EOF;
                 }
                 continue;
+            }
+
+            /* liveedit: audio flows to IPC even during the wait loop so
+             * the downstream process sees a continuous stream. */
+            if (videomaster_context->audio_pipe &&
+                videomaster_context->audio_buffer &&
+                videomaster_context->audio_buffer_size > 0)
+            {
+                ff_videomaster_audio_pipe_push(
+                    videomaster_context->audio_pipe,
+                    videomaster_context->audio_buffer,
+                    videomaster_context->audio_buffer_size);
             }
 
             /* Always probe LTC status (even during wait_for_input) */
@@ -1485,6 +1523,15 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     {
         videomaster_context->disjoined_first_after_wait = false;
         if (ff_videomaster_get_data(videomaster_context) == 0) {
+            if (videomaster_context->audio_pipe &&
+                videomaster_context->audio_buffer &&
+                videomaster_context->audio_buffer_size > 0)
+            {
+                ff_videomaster_audio_pipe_push(
+                    videomaster_context->audio_pipe,
+                    videomaster_context->audio_buffer,
+                    videomaster_context->audio_buffer_size);
+            }
             ff_videomaster_release_data(videomaster_context);
         }
         /* Discard any LTC PTS that was anchored during the wait/drain phase
@@ -1528,6 +1575,15 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
                 pkt->pts = videomaster_context->pts + 1;
                 pkt->dts = pkt->pts;
                 pkt->duration = 1;
+
+                /* liveedit: keep the IPC pipe fed with silence while
+                 * signal is lost so the downstream consumer doesn't
+                 * stall or desync. */
+                if (videomaster_context->audio_pipe)
+                    ff_videomaster_audio_pipe_push(
+                        videomaster_context->audio_pipe,
+                        videomaster_context->silent_audio_buffer,
+                        videomaster_context->silent_audio_buffer_size);
             }
             /* Pace ourselves at the video frame rate */
             av_usleep(frame_dur_us);
@@ -1579,6 +1635,20 @@ int ff_videomaster_read_packet(AVFormatContext *avctx, AVPacket *pkt)
         {
             av_log(avctx, AV_LOG_ERROR, "Failed to get data buffers\n");
             return AVERROR(EIO);
+        }
+
+        /* liveedit: push audio to the IPC pipe once per frame (on the
+         * video half-call, before the audio packet is produced). The
+         * audio_buffer remains valid until the matching audio call
+         * triggers ff_videomaster_release_data. */
+        if (videomaster_context->audio_pipe &&
+            videomaster_context->audio_buffer &&
+            videomaster_context->audio_buffer_size > 0)
+        {
+            ff_videomaster_audio_pipe_push(
+                videomaster_context->audio_pipe,
+                videomaster_context->audio_buffer,
+                videomaster_context->audio_buffer_size);
         }
 
         if (videomaster_context->has_video)
@@ -2248,6 +2318,19 @@ static const AVOption options[] = {
       1,
       AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_VIDEO_PARAM |
           AV_OPT_FLAG_AUDIO_PARAM,
+      NULL },
+    { "audio_pipe",
+      "Windows named pipe path (e.g. \\\\.\\pipe\\liveedit_audio) where raw "
+      "interleaved PCM audio is streamed continuously, independently of "
+      "wait_for_input and wait_for_tc. A second ffmpeg process can consume "
+      "it with '-f s16le|s24le -ar <rate> -ac <channels> -i <pipe>'. "
+      "When unset no pipe is created.",
+      OFFSET(audio_pipe),
+      AV_OPT_TYPE_STRING,
+      { .str = NULL },
+      0,
+      0,
+      AV_OPT_FLAG_DECODING_PARAM | DEC | AV_OPT_FLAG_AUDIO_PARAM,
       NULL },
     { NULL },
 };
